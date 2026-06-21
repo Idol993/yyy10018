@@ -8,24 +8,21 @@ export interface BenchmarkCase {
     length: number;
     width: number;
     height: number;
-    meshSize: number;
   };
   material: {
-    E: number;
+    E_MPa: number;
     nu: number;
   };
   loading: {
-    forceMagnitude: number;
-    forceDirection: { x: number; y: number; z: number };
+    forceN: number;
+    direction: { x: number; y: number; z: number };
   };
   reference: {
-    tipDispY: number;
-    maxVonMises: number;
+    tipDispY_mm: number;
+    maxVonMises_MPa: number;
     stressLocation: string;
     solver: string;
     elementType: string;
-    numNodes: number;
-    numElements: number;
   };
   tolerance: {
     displacementPct: number;
@@ -46,39 +43,38 @@ export interface VerificationResult {
   computedStress: number;
   stressErrorPct: number;
   stressPass: boolean;
+  dispTolerance: number;
+  stressTolerance: number;
   notes: string[];
 }
 
 const CANTILEVER_BENCHMARK: BenchmarkCase = {
   name: 'Cantilever Beam (End Load)',
-  description: '3D cantilever beam with concentrated end load',
+  description: '3D cantilever beam, concentrated tip load, linear elastic',
   referenceSource: 'Abaqus 2020 / C3D4 × 640 elems (linear elastic)',
   geometry: {
     length: 4.0,
     width: 1.0,
     height: 1.0,
-    meshSize: 0.5,
   },
   material: {
-    E: 200000.0,
+    E_MPa: 200000.0,
     nu: 0.3,
   },
   loading: {
-    forceMagnitude: 100.0,
-    forceDirection: { x: 0, y: -1, z: 0 },
+    forceN: 100.0,
+    direction: { x: 0, y: -1, z: 0 },
   },
   reference: {
-    tipDispY: -0.00514,
-    maxVonMises: 3.23,
+    tipDispY_mm: 5.14,
+    maxVonMises_MPa: 3.23,
     stressLocation: 'Fixed end, top/bottom fibers',
     solver: 'Abaqus 2020, Static, General',
     elementType: 'C3D4 (4-node linear tetrahedron)',
-    numNodes: 225,
-    numElements: 640,
   },
   tolerance: {
-    displacementPct: 8.0,
-    stressPct: 20.0,
+    displacementPct: 5.0,
+    stressPct: 15.0,
   },
 };
 
@@ -112,19 +108,17 @@ function detectCantileverConfig(
   const width = Math.abs(maxZ - minZ);
   const height = Math.abs(maxY - minY);
 
-  const E = material.E !== undefined ? material.E : 0;
-
-  if (Math.abs(length - 4.0) > 0.3) {
+  if (Math.abs(length - CANTILEVER_BENCHMARK.geometry.length) > 0.3) {
     isBenchmark = false;
-    notes.push(`Length ${length.toFixed(2)} ≠ 4.0`);
+    notes.push(`Length ${length.toFixed(2)} ≠ ${CANTILEVER_BENCHMARK.geometry.length}`);
   }
-  if (Math.abs(width - 1.0) > 0.2) {
+  if (Math.abs(width - CANTILEVER_BENCHMARK.geometry.width) > 0.2) {
     isBenchmark = false;
-    notes.push(`Width ${width.toFixed(2)} ≠ 1.0`);
+    notes.push(`Width ${width.toFixed(2)} ≠ ${CANTILEVER_BENCHMARK.geometry.width}`);
   }
-  if (Math.abs(height - 1.0) > 0.2) {
+  if (Math.abs(height - CANTILEVER_BENCHMARK.geometry.height) > 0.2) {
     isBenchmark = false;
-    notes.push(`Height ${height.toFixed(2)} ≠ 1.0`);
+    notes.push(`Height ${height.toFixed(2)} ≠ ${CANTILEVER_BENCHMARK.geometry.height}`);
   }
 
   if (bc.fixed.length === 0) {
@@ -132,24 +126,21 @@ function detectCantileverConfig(
     notes.push('No fixed BCs');
   }
 
-  if (E > 0 && Math.abs(E - CANTILEVER_BENCHMARK.material.E) > 1.0) {
-    notes.push(`E=${(E / 1000).toFixed(1)} GPa ≠ 200 GPa`);
-  } else if (E === 0) {
-    notes.push('Young\'s modulus not set');
-  }
-
-  const hasCorrectForce = bc.forces.some(f => {
-    const fy = f.force.y;
-    return Math.abs(fy - (-CANTILEVER_BENCHMARK.loading.forceMagnitude)) < 1.0;
-  });
-
-  if (!hasCorrectForce && bc.forces.length > 0) {
-    notes.push('Force magnitude ≠ -100 N');
-  }
-
   if (bc.forces.length === 0) {
     isBenchmark = false;
     notes.push('No force BCs');
+  }
+
+  const E_MPa = (material.E || 0) / 1e6;
+  if (E_MPa > 0 && Math.abs(E_MPa - CANTILEVER_BENCHMARK.material.E_MPa) > 1.0) {
+    notes.push(`E=${E_MPa.toFixed(0)} MPa ≠ ${CANTILEVER_BENCHMARK.material.E_MPa} MPa`);
+  }
+
+  const hasCorrectForce = bc.forces.some(f =>
+    Math.abs(f.force.y - (-CANTILEVER_BENCHMARK.loading.forceN)) < 1.0
+  );
+  if (!hasCorrectForce && bc.forces.length > 0) {
+    notes.push(`Force Fy ≠ -${CANTILEVER_BENCHMARK.loading.forceN} N`);
   }
 
   return { isBenchmark, notes };
@@ -159,62 +150,59 @@ function getBenchmarkComputedValues(
   mesh: TetMesh,
   bc: BoundaryConditions,
   result: SolverResult,
-  stress: Float64Array | null
-): { tipDispY: number; maxVonMises: number; notes: string[] } {
+  elementStress: Float64Array | null
+): { tipDispY_mm: number; maxVonMises_MPa: number; notes: string[] } {
   const nodes = mesh.nodes;
   const numNodes = mesh.numNodes;
+  const notes: string[] = [];
 
-  let maxX = -Infinity;
-  for (let i = 0; i < numNodes; i++) {
-    const x = nodes[i * 3];
-    if (x > maxX) maxX = x;
-  }
+  const loadNodeIds = bc.forces.map(f => f.nodeId);
 
-  const fixedNodes = new Set<number>();
+  const fixedNodeIds = new Set<number>();
   for (const fb of bc.fixed) {
-    fixedNodes.add(fb.nodeId);
+    fixedNodeIds.add(fb.nodeId);
   }
 
-  const loadNodes = bc.forces.map(f => f.nodeId);
-
-  const EPS = 0.15 * 4.0;
-  let minXRegion = Infinity;
-  for (const nid of fixedNodes) {
-    minXRegion = Math.min(minXRegion, nodes[nid * 3]);
+  let minXFixed = Infinity;
+  for (const nid of fixedNodeIds) {
+    const x = nodes[nid * 3];
+    if (x < minXFixed) minXFixed = x;
   }
 
-  const yDisps: number[] = [];
-  for (const nid of loadNodes) {
-    yDisps.push(result.displacements[nid * 3 + 1]);
+  let tipDispYSum = 0;
+  for (const nid of loadNodeIds) {
+    tipDispYSum += result.displacements[nid * 3 + 1];
   }
+  const tipDispY_m = loadNodeIds.length > 0 ? tipDispYSum / loadNodeIds.length : 0;
+  const tipDispY_mm = Math.abs(tipDispY_m) * 1000;
 
-  const tipDispY = yDisps.length > 0
-    ? yDisps.reduce((a, b) => a + b, 0) / yDisps.length
-    : 0;
+  let maxVonMises_Pa = 0;
+  if (elementStress) {
+    const EPS = 0.15 * CANTILEVER_BENCHMARK.geometry.length;
 
-  let maxVonMises = 0;
-  if (stress) {
-    const sampleStresses: number[] = [];
-    for (let i = 0; i < numNodes; i++) {
-      const x = nodes[i * 3];
-      if (x < minXRegion + EPS && x > minXRegion - EPS) {
-        sampleStresses.push(stress[i]);
+    for (let e = 0; e < mesh.numElements; e++) {
+      const n0 = mesh.elements[e * 4];
+      const cx = (nodes[n0 * 3] +
+                  nodes[mesh.elements[e * 4 + 1] * 3] +
+                  nodes[mesh.elements[e * 4 + 2] * 3] +
+                  nodes[mesh.elements[e * 4 + 3] * 3]) / 4;
+
+      if (cx < minXFixed + EPS) {
+        const s = elementStress[e];
+        if (s > maxVonMises_Pa) maxVonMises_Pa = s;
       }
     }
-    if (sampleStresses.length > 0) {
-      maxVonMises = Math.max(...sampleStresses);
-    }
   }
+  const maxVonMises_MPa = maxVonMises_Pa / 1e6;
 
-  const notes: string[] = [];
-  if (yDisps.length === 0) {
+  if (loadNodeIds.length === 0) {
     notes.push('Could not identify tip load nodes');
   }
-  if (stress === null) {
-    notes.push('Stress data not available');
+  if (elementStress === null) {
+    notes.push('Element stress data not available');
   }
 
-  return { tipDispY, maxVonMises, notes };
+  return { tipDispY_mm, maxVonMises_MPa, notes };
 }
 
 export function runVerification(
@@ -222,7 +210,7 @@ export function runVerification(
   bc: BoundaryConditions,
   material: { E?: number; lambda: number; mu: number },
   result: SolverResult,
-  stress: Float64Array | null
+  elementStress: Float64Array | null
 ): VerificationResult {
   const { isBenchmark, notes: configNotes } = detectCantileverConfig(mesh, bc, material);
 
@@ -240,6 +228,8 @@ export function runVerification(
       computedStress: 0,
       stressErrorPct: 0,
       stressPass: false,
+      dispTolerance: CANTILEVER_BENCHMARK.tolerance.displacementPct,
+      stressTolerance: CANTILEVER_BENCHMARK.tolerance.stressPct,
       notes: [
         'Verification skipped: current model does not match benchmark configuration',
         ...configNotes,
@@ -249,18 +239,19 @@ export function runVerification(
   }
 
   const bm = CANTILEVER_BENCHMARK;
-  const { tipDispY, maxVonMises, notes: computeNotes } = getBenchmarkComputedValues(mesh, bc, result, stress);
+  const { tipDispY_mm, maxVonMises_MPa, notes: computeNotes } =
+    getBenchmarkComputedValues(mesh, bc, result, elementStress);
 
-  const refDisp = bm.reference.tipDispY;
-  const refStress = bm.reference.maxVonMises;
+  const refDisp_mm = bm.reference.tipDispY_mm;
+  const refStress_MPa = bm.reference.maxVonMises_MPa;
 
-  const dispErrorPct = refDisp !== 0
-    ? Math.abs((tipDispY - refDisp) / refDisp) * 100
-    : (tipDispY !== 0 ? 100 : 0);
+  const dispErrorPct = refDisp_mm > 0
+    ? Math.abs((tipDispY_mm - refDisp_mm) / refDisp_mm) * 100
+    : (tipDispY_mm > 0 ? 100 : 0);
 
-  const stressErrorPct = refStress !== 0 && maxVonMises > 0
-    ? Math.abs((maxVonMises - refStress) / refStress) * 100
-    : (maxVonMises > 0 ? 100 : 0);
+  const stressErrorPct = refStress_MPa > 0 && maxVonMises_MPa > 0
+    ? Math.abs((maxVonMises_MPa - refStress_MPa) / refStress_MPa) * 100
+    : (maxVonMises_MPa > 0 ? 100 : 0);
 
   const dispPass = dispErrorPct <= bm.tolerance.displacementPct;
   const stressPass = stressErrorPct <= bm.tolerance.stressPct;
@@ -268,10 +259,11 @@ export function runVerification(
 
   const notes: string[] = [];
   notes.push(`Model: L=${bm.geometry.length} × W=${bm.geometry.width} × H=${bm.geometry.height} m`);
-  notes.push(`Material: E=${(bm.material.E / 1000).toFixed(0)} GPa, ν=${bm.material.nu}`);
-  notes.push(`Loading: Fy=-${bm.loading.forceMagnitude} N at free end`);
+  notes.push(`Material: E=${(bm.material.E_MPa / 1000).toFixed(0)} GPa, ν=${bm.material.nu}`);
+  notes.push(`Loading: Fy=-${bm.loading.forceN} N at free end`);
   notes.push(`Mesh: ${mesh.numNodes} nodes, ${mesh.numElements} tets`);
   notes.push(`Reference: ${bm.reference.solver}, ${bm.reference.elementType}`);
+  notes.push(`Tolerance: disp ≤${bm.tolerance.displacementPct}%, stress ≤${bm.tolerance.stressPct}%`);
   if (computeNotes.length > 0) {
     notes.push(...computeNotes);
   }
@@ -281,27 +273,29 @@ export function runVerification(
     caseName: bm.name,
     referenceSource: bm.referenceSource,
     isBenchmarkCase: true,
-    referenceDisp: Math.abs(refDisp),
-    computedDisp: Math.abs(tipDispY),
+    referenceDisp: refDisp_mm,
+    computedDisp: tipDispY_mm,
     dispErrorPct,
     dispPass,
-    referenceStress: refStress,
-    computedStress: maxVonMises,
+    referenceStress: refStress_MPa,
+    computedStress: maxVonMises_MPa,
     stressErrorPct,
     stressPass,
+    dispTolerance: bm.tolerance.displacementPct,
+    stressTolerance: bm.tolerance.stressPct,
     notes,
   };
 }
 
-export function formatDisp(meters: number): string {
-  if (Math.abs(meters) < 1e-6) return '0 m';
-  if (Math.abs(meters) < 1e-3) return `${(meters * 1e6).toFixed(2)} μm`;
-  if (Math.abs(meters) < 1) return `${(meters * 1e3).toFixed(2)} mm`;
-  return `${meters.toFixed(4)} m`;
+export function formatDisp_mm(mm: number): string {
+  if (Math.abs(mm) < 1e-6) return '0 mm';
+  if (Math.abs(mm) < 0.01) return `${(mm * 1000).toFixed(2)} μm`;
+  if (Math.abs(mm) < 1) return `${mm.toFixed(4)} mm`;
+  return `${mm.toFixed(2)} mm`;
 }
 
-export function formatStress(pa: number): string {
-  if (Math.abs(pa) < 1e3) return `${pa.toFixed(2)} Pa`;
-  if (Math.abs(pa) < 1e6) return `${(pa / 1e3).toFixed(2)} kPa`;
-  return `${(pa / 1e6).toFixed(2)} MPa`;
+export function formatStress_MPa(mpa: number): string {
+  if (Math.abs(mpa) < 1e-3) return `${(mpa * 1000).toFixed(2)} kPa`;
+  if (Math.abs(mpa) < 1) return `${mpa.toFixed(4)} MPa`;
+  return `${mpa.toFixed(2)} MPa`;
 }

@@ -13,24 +13,8 @@ export interface MeshGeneratorResult {
   };
 }
 
-export interface TetGenModule {
-  ready: Promise<any>;
-  wasmInstance: any;
-  tetrahedralize: (
-    numPoints: number, points: Float64Array,
-    numFaces: number, faces: Int32Array,
-    qualityRatio: number, maxVolume: number
-  ) => {
-    numPoints: number;
-    points: Float64Array;
-    numTets: number;
-    tets: Int32Array;
-  };
-  _malloc: (size: number) => number;
-  _free: (ptr: number) => void;
-}
-
-let tetgenModule: TetGenModule | null = null;
+let tetgenWasmInstance: WebAssembly.Instance | null = null;
+let tetgenMemory: WebAssembly.Memory | null = null;
 let tetgenLoadPromise: Promise<boolean> | null = null;
 let tetgenAvailable = false;
 let tetgenLoadError: string | null = null;
@@ -41,87 +25,211 @@ export function getTetGenLoadError(): string | null {
 
 export async function isTetGenAvailable(): Promise<boolean> {
   if (tetgenLoadPromise !== null) return tetgenLoadPromise;
-  tetgenLoadPromise = loadTetGen();
+  tetgenLoadPromise = loadTetGenWasm();
   return tetgenLoadPromise;
 }
 
-async function loadTetGen(): Promise<boolean> {
+async function loadTetGenWasm(): Promise<boolean> {
   try {
-    const existingModule = (window as any).TetGen as TetGenModule;
-    if (existingModule && typeof existingModule.tetrahedralize === 'function') {
-      if (existingModule.ready) {
-        try {
-          await existingModule.ready;
-          if (existingModule.wasmInstance) {
-            tetgenModule = existingModule;
-            tetgenAvailable = true;
-            return true;
-          }
-        } catch (e: any) {
-          tetgenLoadError = 'WASM init failed: ' + (e?.message || String(e));
-        }
-      } else {
-        tetgenModule = existingModule;
-        tetgenAvailable = true;
-        return true;
-      }
-    }
-
-    try {
-      const response = await fetch('/tetgen/tetgen.js', { cache: 'no-store' });
-      if (!response.ok) {
-        tetgenLoadError = `Cannot load tetgen.js (HTTP ${response.status})`;
-        throw new Error(tetgenLoadError);
-      }
-
-      const scriptText = await response.text();
-      const script = document.createElement('script');
-      script.textContent = scriptText;
-      document.head.appendChild(script);
-
-      await new Promise<void>((resolve) => setTimeout(resolve, 50));
-
-      const module = (window as any).TetGen as TetGenModule;
-      if (!module) {
-        tetgenLoadError = 'tetgen.js did not expose TetGen module';
-        throw new Error(tetgenLoadError);
-      }
-
-      if (module.ready) {
-        try {
-          await module.ready;
-          if (module.wasmInstance) {
-            tetgenModule = module;
-            tetgenAvailable = true;
-            return true;
-          } else {
-            tetgenLoadError = 'tetgen.wasm not found or failed to compile';
-            return false;
-          }
-        } catch (e: any) {
-          tetgenLoadError = 'WASM load failed: ' + (e?.message || String(e));
-          return false;
-        }
-      } else {
-        if (typeof module.tetrahedralize === 'function') {
-          tetgenModule = module;
-          tetgenAvailable = true;
-          return true;
-        }
-        tetgenLoadError = 'TetGen module missing tetrahedralize function';
-        return false;
-      }
-    } catch (e: any) {
-      if (!tetgenLoadError) {
-        tetgenLoadError = e?.message || String(e);
-      }
+    const wasmUrl = '/tetgen/tetgen.wasm';
+    const response = await fetch(wasmUrl);
+    if (!response.ok) {
+      tetgenLoadError = `tetgen.wasm not found (HTTP ${response.status}) - place it in public/tetgen/`;
       return false;
     }
+
+    const wasmBuffer = await response.arrayBuffer();
+
+    const memory = new WebAssembly.Memory({ initial: 256, maximum: 2048 });
+    tetgenMemory = memory;
+
+    const importObject: WebAssembly.Imports = {
+      env: {
+        memory: memory,
+        __memory_base: 0,
+        __table_base: 0,
+        __indirect_function_table: new WebAssembly.Table({ initial: 16, element: 'anyfunc' }),
+        abort: () => { throw new Error('TetGen abort'); },
+        _abort: () => { throw new Error('TetGen abort'); },
+        _exit: () => {},
+        abortOnCannotGrowMemory: () => { throw new Error('OOM'); },
+        enlargeMemory: () => { memory.grow(64); },
+        getTotalMemory: () => memory.buffer.byteLength,
+        _emscripten_memcpy_big: (dest: number, src: number, len: number) => {
+          const buf = new Uint8Array(memory.buffer);
+          buf.copyWithin(dest, src, src + len);
+        },
+        _emscripten_resize_heap: (size: number) => {
+          const needed = Math.ceil(size / 65536);
+          const current = memory.buffer.byteLength / 65536;
+          if (needed > current) {
+            memory.grow(needed - current);
+          }
+          return true;
+        },
+        __lock: () => {},
+        __unlock: () => {},
+        ___cxa_allocate_exception: (size: number) => {
+          const ptr = malloc(size + 16);
+          return ptr + 16;
+        },
+        ___cxa_throw: () => { throw new Error('TetGen C++ exception'); },
+        ___cxa_begin_catch: () => 0,
+        ___cxa_end_catch: () => {},
+        ___cxa_is_exception_type: () => 0,
+        __setThrew: () => {},
+        __syscall6: () => 0,
+        __syscall54: () => 0,
+        __syscall140: () => 0,
+        _pthread_mutex_lock: () => 0,
+        _pthread_mutex_unlock: () => 0,
+        _pthread_cond_wait: () => 0,
+        _pthread_cond_signal: () => 0,
+        setTempRet0: () => {},
+        getTempRet0: () => 0,
+        _llvm_stacksave: () => 0,
+        _llvm_stackrestore: () => {},
+        _emscripten_stack_alloc: (size: number) => {
+          return malloc(size);
+        },
+        _emscripten_stack_restore: () => {},
+        _emscripten_stack_get_current: () => {
+          return 0;
+        },
+      },
+      'global.Math': Math as any,
+      global: {
+        NaN: NaN,
+        Infinity: Infinity,
+      },
+    };
+
+    let wasmInstance: WebAssembly.Instance;
+    try {
+      const { instance } = await WebAssembly.instantiate(wasmBuffer, importObject);
+      wasmInstance = instance;
+    } catch (compileErr: any) {
+      tetgenLoadError = `WASM compile failed: ${compileErr?.message || String(compileErr)}`;
+      return false;
+    }
+
+    if (typeof (wasmInstance.exports as any).tetrahedralize !== 'function' &&
+        typeof (wasmInstance.exports as any)._tetrahedralize !== 'function') {
+      tetgenLoadError = 'WASM loaded but missing tetrahedralize export';
+      return false;
+    }
+
+    tetgenWasmInstance = wasmInstance;
+
+    if (typeof (wasmInstance.exports as any)._initialize === 'function') {
+      (wasmInstance.exports as any)._initialize();
+    }
+    if (typeof (wasmInstance.exports as any).___wasm_call_ctors === 'function') {
+      (wasmInstance.exports as any).___wasm_call_ctors();
+    }
+
+    tetgenAvailable = true;
+    return true;
   } catch (e: any) {
     tetgenLoadError = e?.message || String(e);
     tetgenAvailable = false;
     return false;
   }
+}
+
+function getExport(name: string): any {
+  if (!tetgenWasmInstance) throw new Error('TetGen WASM not loaded');
+  const exp = (tetgenWasmInstance.exports as any)[name];
+  if (typeof exp !== 'function' && typeof exp !== 'number') {
+    throw new Error(`TetGen WASM export "${name}" not found`);
+  }
+  return exp;
+}
+
+function malloc(size: number): number {
+  const fn = getExport('malloc') || getExport('_malloc');
+  if (typeof fn !== 'function') throw new Error('malloc not found');
+  return fn(size);
+}
+
+function free(ptr: number): void {
+  const fn = getExport('free') || getExport('_free');
+  if (typeof fn === 'function') fn(ptr);
+}
+
+function tetrahedralize(
+  numPoints: number,
+  points: Float64Array,
+  numFaces: number,
+  faceIndices: Int32Array,
+  qualityRatio: number,
+  maxVolume: number
+): { numOutPoints: number; outPoints: Float64Array; numOutTets: number; outTets: Int32Array } {
+  const mem = tetgenMemory!;
+
+  const pointsPtr = malloc(numPoints * 3 * 8);
+  const facesPtr = malloc(numFaces * 3 * 4);
+
+  const pointsView = new Float64Array(mem.buffer, pointsPtr, numPoints * 3);
+  pointsView.set(points);
+
+  const facesView = new Int32Array(mem.buffer, facesPtr, numFaces * 3);
+  facesView.set(faceIndices);
+
+  const outNumPointsPtr = malloc(4);
+  const outPointsPtrPtr = malloc(4);
+  const outNumTetsPtr = malloc(4);
+  const outTetsPtrPtr = malloc(4);
+
+  const tetFn = getExport('tetrahedralize') || getExport('_tetrahedralize');
+
+  let returnCode: number;
+  try {
+    returnCode = tetFn(
+      numPoints, pointsPtr,
+      numFaces, facesPtr,
+      qualityRatio, maxVolume,
+      outNumPointsPtr, outPointsPtrPtr,
+      outNumTetsPtr, outTetsPtrPtr
+    );
+  } catch (e) {
+    free(pointsPtr);
+    free(facesPtr);
+    free(outNumPointsPtr);
+    free(outPointsPtrPtr);
+    free(outNumTetsPtr);
+    free(outTetsPtrPtr);
+    throw new Error('TetGen tetrahedralize() threw: ' + (e as any)?.message);
+  }
+
+  if (returnCode !== 0) {
+    free(pointsPtr);
+    free(facesPtr);
+    free(outNumPointsPtr);
+    free(outPointsPtrPtr);
+    free(outNumTetsPtr);
+    free(outTetsPtrPtr);
+    throw new Error(`TetGen tetrahedralize() returned error code ${returnCode}`);
+  }
+
+  const outNumPoints = new Int32Array(mem.buffer, outNumPointsPtr, 1)[0];
+  const outPointsPtr = new Int32Array(mem.buffer, outPointsPtrPtr, 1)[0];
+  const outNumTets = new Int32Array(mem.buffer, outNumTetsPtr, 1)[0];
+  const outTetsPtr = new Int32Array(mem.buffer, outTetsPtrPtr, 1)[0];
+
+  const outPoints = new Float64Array(mem.buffer, outPointsPtr, outNumPoints * 3).slice();
+  const outTets = new Int32Array(mem.buffer, outTetsPtr, outNumTets * 4).slice();
+
+  if (outPointsPtr) free(outPointsPtr);
+  if (outTetsPtr) free(outTetsPtr);
+  free(pointsPtr);
+  free(facesPtr);
+  free(outNumPointsPtr);
+  free(outPointsPtrPtr);
+  free(outNumTetsPtr);
+  free(outTetsPtrPtr);
+
+  return { numOutPoints: outNumPoints, outPoints, numOutTets: outNumTets, outTets };
 }
 
 export async function generateHighQualityTetMesh(
@@ -131,7 +239,7 @@ export async function generateHighQualityTetMesh(
 ): Promise<MeshGeneratorResult> {
   const hasTetGen = await isTetGenAvailable();
 
-  if (hasTetGen && tetgenModule) {
+  if (hasTetGen && tetgenWasmInstance) {
     try {
       return generateWithTetGen(surface, targetSize, qualityRatio);
     } catch (e: any) {
@@ -151,36 +259,34 @@ function generateWithTetGen(
   targetSize: number,
   qualityRatio: number
 ): MeshGeneratorResult {
-  if (!tetgenModule) {
-    throw new Error('TetGen module not loaded');
-  }
-
   const numVertices = surface.vertices.length / 3;
   const numFaces = surface.indices.length / 3;
 
-  const facesWithOrientation = new Int32Array(numFaces * 4);
-  for (let i = 0; i < numFaces; i++) {
-    facesWithOrientation[i * 4] = surface.indices[i * 3];
-    facesWithOrientation[i * 4 + 1] = surface.indices[i * 3 + 1];
-    facesWithOrientation[i * 4 + 2] = surface.indices[i * 3 + 2];
-    facesWithOrientation[i * 4 + 3] = 0;
+  const points = new Float64Array(numVertices * 3);
+  for (let i = 0; i < numVertices * 3; i++) {
+    points[i] = surface.vertices[i];
+  }
+
+  const faceIndices = new Int32Array(numFaces * 3);
+  for (let i = 0; i < numFaces * 3; i++) {
+    faceIndices[i] = surface.indices[i];
   }
 
   const maxVolume = targetSize * targetSize * targetSize * 0.5;
 
-  const result = tetgenModule.tetrahedralize(
+  const result = tetrahedralize(
     numVertices,
-    surface.vertices as unknown as Float64Array,
+    points,
     numFaces,
-    facesWithOrientation,
+    faceIndices,
     qualityRatio,
     maxVolume
   );
 
-  const numNodes = result.numPoints;
-  const numElements = result.numTets;
-  const nodes = new Float64Array(result.points);
-  const elements = new Uint32Array(result.tets);
+  const numNodes = result.numOutPoints;
+  const numElements = result.numOutTets;
+  const nodes = result.outPoints;
+  const elements = new Uint32Array(result.outTets);
 
   const { surfaceFaces, surfaceNormals, numSurfaceFaces } = extractSurfaceFaces(nodes, elements, numNodes, numElements);
 
@@ -206,8 +312,8 @@ function extractSurfaceFaces(
 ): { surfaceFaces: Uint32Array; surfaceNormals: Float32Array; numSurfaceFaces: number } {
   const faceMap = new Map<string, number>();
   const faceList: number[][] = [];
-
   const allFaces: number[][] = [];
+
   for (let e = 0; e < numElements; e++) {
     const n0 = elements[e * 4];
     const n1 = elements[e * 4 + 1];

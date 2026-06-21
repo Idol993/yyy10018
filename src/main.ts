@@ -7,7 +7,7 @@ import { FEARenderer } from './renderer';
 import { ConvergenceChart } from './convergence-chart';
 import { InteractionManager } from './interaction';
 import { COOBuilder } from './sparse-matrix';
-import { runVerification, formatDisp, formatStress, type VerificationResult } from './verification';
+import { runVerification, formatDisp_mm, formatStress_MPa, type VerificationResult } from './verification';
 import type { TetMesh, BoundaryConditions, NeoHookeanParams, SolverSettings, SolverResult, InteractionMode, Vec3, FixedBC, ForceBC, AppState, CSRSparseMatrix } from './types';
 
 class WebFEAApp {
@@ -72,7 +72,7 @@ class WebFEAApp {
       'sb-mode', 'sb-gpu', 'sb-mesh', 'sb-solve',
       'stress-legend', 'stress-min', 'stress-max',
       'res-max-disp', 'res-max-stress', 'res-min-stress',
-      'ver-case', 'ver-ref', 'ver-disp', 'ver-disp-err', 'ver-stress-err',
+      'ver-case', 'ver-ref', 'ver-disp', 'ver-disp-err', 'ver-stress-err', 'ver-disp-tol', 'ver-stress-tol',
       'mode-indicator',
     ];
     for (const id of ids) {
@@ -325,6 +325,8 @@ class WebFEAApp {
     (this.els['ver-stress-err'] as HTMLElement).textContent = '—';
     (this.els['ver-disp-err'] as HTMLElement).style.color = '';
     (this.els['ver-stress-err'] as HTMLElement).style.color = '';
+    (this.els['ver-disp-tol'] as HTMLElement).textContent = '—';
+    (this.els['ver-stress-tol'] as HTMLElement).textContent = '—';
     (this.els['status-iter'] as HTMLElement).textContent = '—';
     (this.els['status-residual'] as HTMLElement).textContent = '—';
     (this.els['status-time'] as HTMLElement).textContent = '—';
@@ -596,16 +598,18 @@ class WebFEAApp {
       (this.els['ver-stress-err'] as HTMLElement).textContent = '—';
       (this.els['ver-disp-err'] as HTMLElement).style.color = '';
       (this.els['ver-stress-err'] as HTMLElement).style.color = '';
+      (this.els['ver-disp-tol'] as HTMLElement).textContent = '—';
+      (this.els['ver-stress-tol'] as HTMLElement).textContent = '—';
       return;
     }
 
-    const stress = this.state.result.vonMisesStress;
+    const elementStress = this.state.result.vonMisesStress;
     const ver = runVerification(
       this.state.tetMesh,
       this.state.bc,
       this.state.material,
       this.state.result,
-      stress
+      elementStress
     );
 
     if (!ver) {
@@ -617,7 +621,9 @@ class WebFEAApp {
 
     (this.els['ver-case'] as HTMLElement).textContent = ver.caseName;
     (this.els['ver-ref'] as HTMLElement).textContent = ver.referenceSource;
-    (this.els['ver-disp'] as HTMLElement).textContent = formatDisp(ver.referenceDisp);
+    (this.els['ver-disp'] as HTMLElement).textContent = formatDisp_mm(ver.referenceDisp) + ' (ref)';
+    (this.els['ver-disp-tol'] as HTMLElement).textContent = `≤${ver.dispTolerance}%`;
+    (this.els['ver-stress-tol'] as HTMLElement).textContent = `≤${ver.stressTolerance}%`;
 
     (this.els['ver-disp-err'] as HTMLElement).style.color =
       ver.dispPass ? 'var(--accent2)' : 'var(--danger)';
@@ -642,14 +648,14 @@ class WebFEAApp {
       this.appendLog(`Case: ${ver.caseName}`, '');
       this.appendLog(`Reference: ${ver.referenceSource}`, '');
       this.appendLog('─────────────────────────────────────────', '');
-      this.appendLog(`Displacement:`, '');
-      this.appendLog(`  Computed:  ${formatDisp(ver.computedDisp)}`, '');
-      this.appendLog(`  Reference: ${formatDisp(ver.referenceDisp)}`, '');
+      this.appendLog(`Displacement (tolerance ≤${ver.dispTolerance}%):`, '');
+      this.appendLog(`  Computed:  ${formatDisp_mm(ver.computedDisp)}`, '');
+      this.appendLog(`  Reference: ${formatDisp_mm(ver.referenceDisp)}`, '');
       this.appendLog(`  Error:     ${ver.dispErrorPct.toFixed(2)}% ${dispIcon}`,
         ver.dispPass ? 'conv' : 'warn');
-      this.appendLog(`Stress (von Mises):`, '');
-      this.appendLog(`  Computed:  ${formatStress(ver.computedStress)}`, '');
-      this.appendLog(`  Reference: ${formatStress(ver.referenceStress)}`, '');
+      this.appendLog(`Stress von Mises (tolerance ≤${ver.stressTolerance}%):`, '');
+      this.appendLog(`  Computed:  ${formatStress_MPa(ver.computedStress)}`, '');
+      this.appendLog(`  Reference: ${formatStress_MPa(ver.referenceStress)}`, '');
       this.appendLog(`  Error:     ${ver.stressErrorPct.toFixed(2)}% ${stressIcon}`,
         ver.stressPass ? 'conv' : 'warn');
       if (ver.notes.length > 0) {
