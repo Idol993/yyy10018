@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>WebFEA — Nonlinear Finite Element Analysis</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#0d1117;--panel:#161b22;--border:#30363d;--text:#c9d1d9;
+  --accent:#58a6ff;--accent2:#3fb950;--danger:#f85149;
+  --header:#21262d;--input:#0d1117;--hover:#1f6feb22;
+}
+html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,-apple-system,sans-serif;font-size:13px}
+#app{display:grid;grid-template-rows:42px 1fr 28px;grid-template-columns:280px 1fr 300px;width:100%;height:100%}
+#toolbar{grid-column:1/-1;grid-row:1;display:flex;align-items:center;gap:6px;padding:0 12px;background:var(--header);border-bottom:1px solid var(--border)}
+#toolbar .brand{font-weight:700;font-size:15px;color:var(--accent);margin-right:16px;letter-spacing:-0.5px}
+#toolbar .brand span{color:var(--text);font-weight:400}
+.tb-group{display:flex;align-items:center;gap:4px;padding:0 8px;border-left:1px solid var(--border)}
+.tb-btn{background:var(--panel);border:1px solid var(--border);color:var(--text);padding:4px 10px;border-radius:4px;cursor:pointer;font-size:12px;display:flex;align-items:center;gap:4px;transition:all .15s}
+.tb-btn:hover{background:var(--hover);border-color:var(--accent)}
+.tb-btn.active{background:#1f6feb33;border-color:var(--accent);color:var(--accent)}
+.tb-btn.solve{background:#238636;border-color:#2ea043;color:#fff;font-weight:600}
+.tb-btn.solve:hover{background:#2ea043}
+.tb-btn.solve:disabled{opacity:.5;cursor:not-allowed}
+#left-panel{grid-column:1;grid-row:2;overflow-y:auto;background:var(--panel);border-right:1px solid var(--border);padding:8px}
+#viewport{grid-column:2;grid-row:2;position:relative;overflow:hidden;background:var(--bg)}
+#viewport canvas{width:100%!important;height:100%!important}
+#right-panel{grid-column:3;grid-row:2;overflow-y:auto;background:var(--panel);border-left:1px solid var(--border);padding:8px}
+#statusbar{grid-column:1/-1;grid-row:3;display:flex;align-items:center;padding:0 12px;background:var(--header);border-top:1px solid var(--border);gap:16px;font-size:11px;color:#8b949e}
+.section{margin-bottom:12px}
+.section-title{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:#8b949e;padding:6px 0 4px;border-bottom:1px solid var(--border);margin-bottom:6px;display:flex;align-items:center;gap:6px}
+.section-title .icon{font-size:13px}
+.field{display:flex;align-items:center;gap:6px;margin-bottom:4px}
+.field label{width:80px;flex-shrink:0;font-size:11px;color:#8b949e}
+.field input,.field select{flex:1;background:var(--input);border:1px solid var(--border);color:var(--text);padding:3px 6px;border-radius:3px;font-size:12px;min-width:0}
+.field input:focus,.field select:focus{outline:none;border-color:var(--accent)}
+.field input[type=number]{width:70px;flex:none;text-align:right}
+.info-row{display:flex;justify-content:space-between;padding:2px 0;font-size:11px}
+.info-row .val{color:var(--accent);font-weight:500}
+.bc-list{max-height:200px;overflow-y:auto}
+.bc-item{display:flex;align-items:center;gap:4px;padding:3px 4px;border-radius:3px;font-size:11px;background:var(--bg);margin-bottom:2px}
+.bc-item .bc-type{padding:1px 4px;border-radius:2px;font-size:10px;font-weight:600}
+.bc-item .bc-type.fixed{background:#f8514933;color:var(--danger)}
+.bc-item .bc-type.force{background:#58a6ff33;color:var(--accent)}
+.bc-item .bc-node{color:#8b949e}
+.bc-item .bc-val{margin-left:auto;color:var(--accent2)}
+.bc-item .bc-del{cursor:pointer;color:#8b949e;margin-left:4px}
+.bc-item .bc-del:hover{color:var(--danger)}
+#convergence-canvas{width:100%;height:180px;background:var(--bg);border:1px solid var(--border);border-radius:4px}
+.legend-bar{height:16px;border-radius:3px;margin:4px 0}
+.legend-labels{display:flex;justify-content:space-between;font-size:10px;color:#8b949e}
+.solver-status{padding:8px;background:var(--bg);border-radius:4px;margin-top:6px;font-size:11px}
+.solver-status .iter{color:var(--accent);font-weight:600}
+.solver-status .residual{color:var(--accent2)}
+.mode-indicator{position:absolute;top:8px;left:50%;transform:translateX(-50%);padding:4px 12px;background:#1f6febcc;border-radius:4px;color:#fff;font-size:12px;font-weight:600;pointer-events:none;opacity:0;transition:opacity .2s}
+.mode-indicator.visible{opacity:1}
+.solver-log{max-height:150px;overflow-y:auto;font-family:'Cascadia Code',monospace;font-size:10px;line-height:1.4;color:#8b949e;padding:4px;background:var(--bg);border-radius:3px;margin-top:4px}
+.solver-log .conv{color:var(--accent2)}
+.solver-log .warn{color:#d29922}
+.solver-log .err{color:var(--danger)}
+.overlay-info{position:absolute;bottom:8px;left:8px;font-size:10px;color:#8b949e;pointer-events:none}
+.overlay-info kbd{background:var(--panel);border:1px solid var(--border);padding:1px 4px;border-radius:2px;font-size:9px}
+::-webkit-scrollbar{width:6px}
+::-webkit-scrollbar-track{background:var(--bg)}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+::-webkit-scrollbar-thumb:hover{background:#484f58}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="toolbar">
+    <div class="brand">WebFEA <span>Nonlinear FEA</span></div>
+    <div class="tb-group">
+      <button class="tb-btn" id="btn-import" title="Import STL/OBJ model">📂 Import</button>
+      <button class="tb-btn" id="btn-sample" title="Load sample model">📋 Sample</button>
+    </div>
+    <div class="tb-group">
+      <button class="tb-btn" id="btn-mesh" title="Generate tetrahedral mesh">🔲 Mesh</button>
+    </div>
+    <div class="tb-group">
+      <button class="tb-btn" id="btn-fix" title="Add fixed constraint (click nodes)">📌 Fixed</button>
+      <button class="tb-btn" id="btn-force" title="Add force (click & drag)">💪 Force</button>
+      <button class="tb-btn" id="btn-clear-bc" title="Clear all boundary conditions">🗑️ Clear BC</button>
+    </div>
+    <div class="tb-group">
+      <button class="tb-btn solve" id="btn-solve" title="Run solver">▶ Solve</button>
+      <button class="tb-btn" id="btn-stop" title="Stop solver">⏹ Stop</button>
+    </div>
+    <div class="tb-group">
+      <button class="tb-btn" id="btn-wireframe" title="Toggle wireframe">◈ Wire</button>
+      <button class="tb-btn" id="btn-deformed" title="Toggle deformed shape">↗ Deform</button>
+      <button class="tb-btn" id="btn-stress" title="Toggle stress coloring">🎨 Stress</button>
+    </div>
+  </div>
+
+  <div id="left-panel">
+    <div class="section">
+      <div class="section-title"><span class="icon">📦</span> Model Info</div>
+      <div class="info-row"><span>Nodes</span><span class="val" id="info-nodes">—</span></div>
+      <div class="info-row"><span>Elements</span><span class="val" id="info-elements">—</span></div>
+      <div class="info-row"><span>DOFs</span><span class="val" id="info-dofs">—</span></div>
+      <div class="info-row"><span>Surface faces</span><span class="val" id="info-faces">—</span></div>
+    </div>
+    <div class="section">
+      <div class="section-title"><span class="icon">🧪</span> Material (Neo-Hookean)</div>
+      <div class="field"><label>E (MPa)</label><input type="number" id="mat-E" value="200" step="1" min="0.01"/></div>
+      <div class="field"><label>ν</label><input type="number" id="mat-nu" value="0.3" step="0.01" min="0" max="0.499"/></div>
+    </div>
+    <div class="section">
+      <div class="section-title"><span class="icon">⚙️</span> Solver Settings</div>
+      <div class="field"><label>Max iterations</label><input type="number" id="solve-maxiter" value="30" step="1" min="1" max="100"/></div>
+      <div class="field"><label>Tolerance</label><input type="number" id="solve-tol" value="1e-6" step="1e-7" min="1e-12"/></div>
+      <div class="field"><label>Load steps</label><input type="number" id="solve-steps" value="5" step="1" min="1" max="50"/></div>
+      <div class="field"><label>Deform scale</label><input type="number" id="deform-scale" value="1" step="0.1" min="0.1"/></div>
+    </div>
+    <div class="section">
+      <div class="section-title"><span class="icon">📌</span> Boundary Conditions</div>
+      <div class="bc-list" id="bc-list"></div>
+    </div>
+  </div>
+
+  <div id="viewport">
+    <div class="mode-indicator" id="mode-indicator"></div>
+    <div class="overlay-info">
+      <kbd>LMB</kbd> Rotate &nbsp; <kbd>RMB</kbd> Pan &nbsp; <kbd>Scroll</kbd> Zoom
+    </div>
+  </div>
+
+  <div id="right-panel">
+    <div class="section">
+      <div class="section-title"><span class="icon">📊</span> Convergence</div>
+      <canvas id="convergence-canvas"></canvas>
+      <div class="solver-status" id="solver-status">
+        <div>Iterations: <span class="iter" id="status-iter">0</span></div>
+        <div>Residual: <span class="residual" id="status-residual">—</span></div>
+        <div>Time: <span id="status-time">—</span></div>
+      </div>
+      <div class="solver-log" id="solver-log"></div>
+    </div>
+    <div class="section">
+      <div class="section-title"><span class="icon">🎨</span> Stress Legend</div>
+      <div class="legend-bar" id="stress-legend"></div>
+      <div class="legend-labels"><span id="stress-min">0</span><span id="stress-max">0 MPa</span></div>
+    </div>
+    <div class="section">
+      <div class="section-title"><span class="icon">📐</span> Results</div>
+      <div class="info-row"><span>Max displacement</span><span class="val" id="res-max-disp">—</span></div>
+      <div class="info-row"><span>Max von Mises</span><span class="val" id="res-max-stress">—</span></div>
+      <div class="info-row"><span>Min von Mises</span><span class="val" id="res-min-stress">—</span></div>
+    </div>
+    <div class="section">
+      <div class="section-title"><span class="icon">✅</span> Verification</div>
+      <div class="info-row"><span>Analytical disp</span><span class="val" id="ver-disp">—</span></div>
+      <div class="info-row"><span>Disp error</span><span class="val" id="ver-disp-err">—</span></div>
+      <div class="info-row"><span>Stress error</span><span class="val" id="ver-stress-err">—</span></div>
+    </div>
+  </div>
+
+  <div id="statusbar">
+    <span id="sb-mode">Mode: Navigate</span>
+    <span id="sb-gpu">GPU: —</span>
+    <span id="sb-mesh">Mesh: —</span>
+    <span id="sb-solve">Solver: Idle</span>
+  </div>
+</div>
+
+<input type="file" id="file-input" accept=".stl,.obj" style="display:none" />
+<script type="module" src="/src/main.ts"></script>
+</body>
+</html>
