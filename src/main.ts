@@ -1,6 +1,6 @@
 import { loadModelFile } from './mesh-loader';
 import { generateTetMesh, generateSampleCube, generateBeam, findNearestNode } from './tet-mesh';
-import { generateHighQualityTetMesh, isTetGenAvailable, computeMeshQuality, type MeshGeneratorType } from './tetgen-wasm';
+import { generateHighQualityTetMesh, isTetGenAvailable, getTetGenLoadError, computeMeshQuality, type MeshGeneratorType } from './tetgen-wasm';
 import { solveNewtonRaphson, computeNeoHookeanPK1, computeVonMisesFromPK1, computeTetShapeGradients, assembleTangentAndInternal, assembleExternalForce } from './fem-solver';
 import { WebGPUBackend, pcgSolveCPU } from './gpu-pcg';
 import { FEARenderer } from './renderer';
@@ -23,6 +23,9 @@ class WebFEAApp {
   private readonly converters = { EtoMuLambda: (E: number, nu: number) => ({ mu: E / (2 * (1 + nu)), lambda: (E * nu) / ((1 + nu) * (1 - 2 * nu)) }) };
 
   constructor() {
+    const E = 200e3;
+    const nu = 0.3;
+    const conv = (() => ({ mu: E / (2 * (1 + nu)), lambda: (E * nu) / ((1 + nu) * (1 - 2 * nu)) }))();
     this.state = {
       mode: 'navigate',
       surfaceMesh: null,
@@ -30,7 +33,7 @@ class WebFEAApp {
       meshMethod: 'builtin',
       meshQuality: null,
       bc: { fixed: [], forces: [] },
-      material: { mu: 76.9e3, lambda: 115.4e3 },
+      material: { E, nu, ...conv },
       settings: { maxIter: 30, tolerance: 1e-6, loadSteps: 5 },
       result: null,
       showWireframe: false,
@@ -149,12 +152,32 @@ class WebFEAApp {
   private async handleFileImport(e: Event): Promise<void> {
     const input = e.target as HTMLInputElement;
     const file = input.files?.[0];
-    if (!file || !this.state.surfaceMesh) return;
+    if (!file) return;
 
     try {
       const surfaceMesh = await loadModelFile(file);
       this.state.surfaceMesh = surfaceMesh;
-      this.appendLog(`Loaded surface mesh: ${surfaceMesh.vertices.length / 3} vertices, ${surfaceMesh.indices.length / 3} faces`, '');
+      
+      this.clearResults();
+      this.state.tetMesh = null;
+      this.state.bc = { fixed: [], forces: [] };
+      this.state.meshMethod = 'builtin';
+      this.state.meshQuality = null;
+      this.state.showStress = false;
+      
+      this.renderer.setMesh(null);
+      this.renderer.updateBCVisualization({ fixed: [], forces: [] }, null);
+      this.renderer.setStressColoring(false);
+      this.interaction.setMesh(null);
+      this.interaction.setMode('navigate');
+      this.setMode('navigate');
+      this.syncButtonStates();
+      
+      this.appendLog(`Loaded surface mesh: ${(surfaceMesh.vertices.length / 3).toLocaleString()} vertices, ${(surfaceMesh.indices.length / 3).toLocaleString()} faces`, '');
+      this.appendLog('Click "Mesh" to generate tetrahedral volume mesh', 'warn');
+      
+      this.updateUI();
+      this.updateBCList();
     } catch (err) {
       this.appendLog(`Failed to load model: ${err}`, 'err');
     }
@@ -162,6 +185,13 @@ class WebFEAApp {
   }
 
   private loadSampleCube(): void {
+    this.clearResults();
+    
+    const E = 200e3;
+    const nu = 0.3;
+    const conv = this.converters.EtoMuLambda(E, nu);
+    this.state.material = { E, nu, ...conv };
+    
     this.state.tetMesh = generateBeam(4, 1, 1, 4);
     this.state.surfaceMesh = {
       vertices: new Float32Array(this.state.tetMesh.nodes),
@@ -191,6 +221,7 @@ class WebFEAApp {
     this.appendLog(`Mesh method: Built-in structured grid`, '');
     this.appendLog(`Auto-added ${this.state.bc.fixed.length} fixed BCs at x=-2`, '');
     this.appendLog(`Auto-added ${this.state.bc.forces.length} force BCs at x=+2, Fy=-100N`, '');
+    this.appendLog('This matches the Abaqus verification benchmark case', 'conv');
 
     this.updateUI();
     this.updateBCList();
@@ -206,12 +237,19 @@ class WebFEAApp {
       const targetSize = parseFloat(prompt('Enter target element size:', '0.3') || '0.3');
 
       this.appendLog('Generating tetrahedral mesh...', '');
+      
       const hasTetGen = await isTetGenAvailable();
+      const loadError = getTetGenLoadError();
 
       if (hasTetGen) {
-        this.appendLog('Using TetGen WASM for high-quality meshing', '');
+        this.appendLog('✅ Using TetGen WASM for high-quality constrained Delaunay meshing', '');
       } else {
-        this.appendLog('⚠️ TetGen WASM not available, using voxel approximation', 'warn');
+        this.appendLog('⚠️ TetGen WASM unavailable - falling back to VOXEL APPROXIMATION', 'warn');
+        if (loadError) {
+          this.appendLog(`   Reason: ${loadError}`, 'warn');
+        }
+        this.appendLog('   Voxel meshes have stair-step boundaries and lower quality', 'warn');
+        this.appendLog('   See public/tetgen/README.md for instructions to enable TetGen', 'warn');
       }
 
       const result = await generateHighQualityTetMesh(this.state.surfaceMesh, targetSize, 1.414);
@@ -222,15 +260,22 @@ class WebFEAApp {
       const t1 = performance.now();
 
       this.state.bc = { fixed: [], forces: [] };
+      this.state.result = null;
       this.renderer.setMesh(this.state.tetMesh);
+      this.renderer.updateDeformation(null, 0, null);
       this.interaction.setMesh(this.state.tetMesh);
+      this.interaction.setMode('navigate');
+      this.setMode('navigate');
 
-      const methodLabel = result.method === 'tetgen' ? 'TetGen (high quality)' : 'Voxel (approximate)';
+      const methodLabel = result.method === 'tetgen' ? '✅ TetGen (high quality)' : '⚠️ Voxel (approximate)';
       this.appendLog(`Mesh generated: ${this.state.tetMesh.numNodes} nodes, ${this.state.tetMesh.numElements} tets`, 'conv');
       this.appendLog(`Method: ${methodLabel}`, '');
       this.appendLog(`Quality: min=${result.quality.minQuality.toFixed(3)}, avg=${result.quality.avgQuality.toFixed(3)}, maxAR=${result.quality.maxAspectRatio.toFixed(2)}`, '');
       this.appendLog(`Time: ${(t1 - t0).toFixed(1)}ms`, '');
+      
+      this.clearResults();
       this.updateUI();
+      this.updateBCList();
     } catch (err) {
       this.appendLog(`Mesh generation failed: ${err}`, 'err');
     }
@@ -264,10 +309,41 @@ class WebFEAApp {
     this.appendLog('All boundary conditions cleared', '');
   }
 
+  private clearResults(): void {
+    this.state.result = null;
+    this.state.showStress = false;
+    
+    (this.els['res-max-disp'] as HTMLElement).textContent = '—';
+    (this.els['res-max-stress'] as HTMLElement).textContent = '—';
+    (this.els['res-min-stress'] as HTMLElement).textContent = '—';
+    (this.els['stress-min'] as HTMLElement).textContent = '—';
+    (this.els['stress-max'] as HTMLElement).textContent = '—';
+    (this.els['ver-case'] as HTMLElement).textContent = '—';
+    (this.els['ver-ref'] as HTMLElement).textContent = '—';
+    (this.els['ver-disp'] as HTMLElement).textContent = '—';
+    (this.els['ver-disp-err'] as HTMLElement).textContent = '—';
+    (this.els['ver-stress-err'] as HTMLElement).textContent = '—';
+    (this.els['ver-disp-err'] as HTMLElement).style.color = '';
+    (this.els['ver-stress-err'] as HTMLElement).style.color = '';
+    (this.els['status-iter'] as HTMLElement).textContent = '—';
+    (this.els['status-residual'] as HTMLElement).textContent = '—';
+    (this.els['status-time'] as HTMLElement).textContent = '—';
+    (this.els['sb-solve'] as HTMLElement).textContent = 'Solver: Ready';
+    
+    this.convergenceChart?.clear();
+    this.syncButtonStates();
+    
+    if (this.renderer) {
+      this.renderer.updateDeformation(null, 0, null);
+      this.renderer.setStressColoring(false);
+    }
+  }
+
   private updateMaterial(): void {
     const E = parseFloat((this.els['mat-E'] as HTMLInputElement).value) * 1e3;
     const nu = parseFloat((this.els['mat-nu'] as HTMLInputElement).value);
-    this.state.material = this.converters.EtoMuLambda(E, nu);
+    const conv = this.converters.EtoMuLambda(E, nu);
+    this.state.material = { E, nu, ...conv };
   }
 
   private updateSettings(): void {
@@ -392,6 +468,31 @@ class WebFEAApp {
     const stress = this.state.showStress ? this.state.result.vonMisesStress : null;
     const scale = this.state.showDeformed ? this.state.deformScale : 0;
     this.renderer.updateDeformation(this.state.result.displacements, scale, stress);
+    this.updateStressLegend();
+  }
+
+  private updateStressLegend(): void {
+    if (!this.state.tetMesh || !this.state.result) return;
+
+    const stressRange = this.renderer.getCurrentStressRange();
+
+    if (this.state.showStress && stressRange) {
+      const minS = stressRange.min;
+      const maxS = stressRange.max;
+
+      (this.els['res-max-stress'] as HTMLElement).textContent = (maxS / 1e6).toFixed(2) + ' MPa';
+      (this.els['res-min-stress'] as HTMLElement).textContent = (minS / 1e6).toFixed(2) + ' MPa';
+      (this.els['stress-max'] as HTMLElement).textContent = (maxS / 1e6).toFixed(2) + ' MPa';
+      (this.els['stress-min'] as HTMLElement).textContent = (minS / 1e6).toFixed(2) + ' MPa';
+
+      const legend = this.els['stress-legend'] as HTMLElement;
+      legend.style.background = 'linear-gradient(to right, #440154, #3b528b, #21918c, #5ec962, #fde725)';
+    } else if (!this.state.showStress) {
+      (this.els['res-max-stress'] as HTMLElement).textContent = '—';
+      (this.els['res-min-stress'] as HTMLElement).textContent = '—';
+      (this.els['stress-max'] as HTMLElement).textContent = '—';
+      (this.els['stress-min'] as HTMLElement).textContent = '—';
+    }
   }
 
   private updateUI(): void {
@@ -482,36 +583,29 @@ class WebFEAApp {
       if (d > maxDisp) maxDisp = d;
     }
 
-    const stress = result.vonMisesStress;
-    let maxS = 0, minS = Infinity;
-    for (const s of stress) {
-      if (s > maxS) maxS = s;
-      if (s < minS) minS = s;
-    }
-
     (this.els['res-max-disp'] as HTMLElement).textContent = maxDisp.toExponential(3) + ' m';
-    (this.els['res-max-stress'] as HTMLElement).textContent = (maxS / 1e6).toFixed(2) + ' MPa';
-    (this.els['res-min-stress'] as HTMLElement).textContent = (minS / 1e6).toFixed(2) + ' MPa';
-    (this.els['stress-max'] as HTMLElement).textContent = (maxS / 1e6).toFixed(2) + ' MPa';
-    (this.els['stress-min'] as HTMLElement).textContent = (minS / 1e6).toFixed(2) + ' MPa';
-
-    const legend = this.els['stress-legend'] as HTMLElement;
-    legend.style.background = 'linear-gradient(to right, #440154, #3b528b, #21918c, #5ec962, #fde725)';
+    this.updateStressLegend();
   }
 
   private runVerification(): void {
     if (!this.state.tetMesh || !this.state.result) {
+      (this.els['ver-case'] as HTMLElement).textContent = '—';
+      (this.els['ver-ref'] as HTMLElement).textContent = '—';
       (this.els['ver-disp'] as HTMLElement).textContent = '—';
       (this.els['ver-disp-err'] as HTMLElement).textContent = '—';
       (this.els['ver-stress-err'] as HTMLElement).textContent = '—';
+      (this.els['ver-disp-err'] as HTMLElement).style.color = '';
+      (this.els['ver-stress-err'] as HTMLElement).style.color = '';
       return;
     }
 
+    const stress = this.state.result.vonMisesStress;
     const ver = runVerification(
       this.state.tetMesh,
       this.state.bc,
       this.state.material,
-      this.state.result
+      this.state.result,
+      stress
     );
 
     if (!ver) {
@@ -521,28 +615,60 @@ class WebFEAApp {
       return;
     }
 
-    (this.els['ver-disp'] as HTMLElement).textContent = formatDisp(ver.referenceDisp);
     (this.els['ver-case'] as HTMLElement).textContent = ver.caseName;
     (this.els['ver-ref'] as HTMLElement).textContent = ver.referenceSource;
-    (this.els['ver-disp-err'] as HTMLElement).textContent = ver.dispErrorPct.toFixed(2) + '%';
-    (this.els['ver-stress-err'] as HTMLElement).textContent = ver.stressErrorPct.toFixed(2) + '%';
+    (this.els['ver-disp'] as HTMLElement).textContent = formatDisp(ver.referenceDisp);
 
     (this.els['ver-disp-err'] as HTMLElement).style.color =
       ver.dispPass ? 'var(--accent2)' : 'var(--danger)';
     (this.els['ver-stress-err'] as HTMLElement).style.color =
       ver.stressPass ? 'var(--accent2)' : 'var(--danger)';
 
-    (this.els['ver-disp-err'] as HTMLElement).textContent =
-      (ver.dispPass ? '✓ ' : '✗ ') + ver.dispErrorPct.toFixed(2) + '%';
-    (this.els['ver-stress-err'] as HTMLElement).textContent =
-      (ver.stressPass ? '✓ ' : '✗ ') + ver.stressErrorPct.toFixed(2) + '%';
+    const dispIcon = ver.dispPass ? '✓' : '✗';
+    const stressIcon = ver.stressPass ? '✓' : '✗';
 
-    this.appendLog(`Verification: ${ver.caseName}`, '');
-    this.appendLog(`  Ref: ${ver.referenceSource}`, '');
-    this.appendLog(`  Disp: ${formatDisp(ver.computedDisp)} vs ref ${formatDisp(ver.referenceDisp)} (${ver.dispErrorPct.toFixed(2)}%) ${ver.dispPass ? '✓' : '✗'}`,
-      ver.dispPass ? 'conv' : 'warn');
-    this.appendLog(`  Stress: ${formatStress(ver.computedStress)} vs ref ${formatStress(ver.referenceStress)} (${ver.stressErrorPct.toFixed(2)}%) ${ver.stressPass ? '✓' : '✗'}`,
-      ver.stressPass ? 'conv' : 'warn');
+    (this.els['ver-disp-err'] as HTMLElement).textContent =
+      `${dispIcon} ${ver.dispErrorPct.toFixed(2)}%`;
+    (this.els['ver-stress-err'] as HTMLElement).textContent =
+      `${stressIcon} ${ver.stressErrorPct.toFixed(2)}%`;
+
+    if (ver.isBenchmarkCase) {
+      this.appendLog('═══════════════════════════════════════', '');
+      if (ver.pass) {
+        this.appendLog('✅ VERIFICATION PASSED', 'conv');
+      } else {
+        this.appendLog('❌ VERIFICATION FAILED', 'err');
+      }
+      this.appendLog(`Case: ${ver.caseName}`, '');
+      this.appendLog(`Reference: ${ver.referenceSource}`, '');
+      this.appendLog('─────────────────────────────────────────', '');
+      this.appendLog(`Displacement:`, '');
+      this.appendLog(`  Computed:  ${formatDisp(ver.computedDisp)}`, '');
+      this.appendLog(`  Reference: ${formatDisp(ver.referenceDisp)}`, '');
+      this.appendLog(`  Error:     ${ver.dispErrorPct.toFixed(2)}% ${dispIcon}`,
+        ver.dispPass ? 'conv' : 'warn');
+      this.appendLog(`Stress (von Mises):`, '');
+      this.appendLog(`  Computed:  ${formatStress(ver.computedStress)}`, '');
+      this.appendLog(`  Reference: ${formatStress(ver.referenceStress)}`, '');
+      this.appendLog(`  Error:     ${ver.stressErrorPct.toFixed(2)}% ${stressIcon}`,
+        ver.stressPass ? 'conv' : 'warn');
+      if (ver.notes.length > 0) {
+        this.appendLog('Notes:', '');
+        for (const note of ver.notes) {
+          this.appendLog(`  • ${note}`, '');
+        }
+      }
+      this.appendLog('═══════════════════════════════════════', '');
+
+      if (!ver.pass) {
+        this.appendLog('⚠️  Benchmark tolerances exceeded - results may be unreliable', 'err');
+      }
+    } else {
+      this.appendLog('Verification: Not a standard benchmark case', 'warn');
+      for (const note of ver.notes.slice(0, 3)) {
+        this.appendLog(`  • ${note}`, 'warn');
+      }
+    }
   }
 
   private appendLog(msg: string, cls: string = ''): void {

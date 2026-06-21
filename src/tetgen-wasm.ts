@@ -13,9 +13,31 @@ export interface MeshGeneratorResult {
   };
 }
 
-let tetgenModule: any = null;
+export interface TetGenModule {
+  ready: Promise<any>;
+  wasmInstance: any;
+  tetrahedralize: (
+    numPoints: number, points: Float64Array,
+    numFaces: number, faces: Int32Array,
+    qualityRatio: number, maxVolume: number
+  ) => {
+    numPoints: number;
+    points: Float64Array;
+    numTets: number;
+    tets: Int32Array;
+  };
+  _malloc: (size: number) => number;
+  _free: (ptr: number) => void;
+}
+
+let tetgenModule: TetGenModule | null = null;
 let tetgenLoadPromise: Promise<boolean> | null = null;
 let tetgenAvailable = false;
+let tetgenLoadError: string | null = null;
+
+export function getTetGenLoadError(): string | null {
+  return tetgenLoadError;
+}
 
 export async function isTetGenAvailable(): Promise<boolean> {
   if (tetgenLoadPromise !== null) return tetgenLoadPromise;
@@ -25,31 +47,78 @@ export async function isTetGenAvailable(): Promise<boolean> {
 
 async function loadTetGen(): Promise<boolean> {
   try {
-    const Module = (window as any).TetGen;
-    if (Module && typeof Module.tetrahedralize === 'function') {
-      tetgenModule = Module;
-      tetgenAvailable = true;
-      return true;
+    const existingModule = (window as any).TetGen as TetGenModule;
+    if (existingModule && typeof existingModule.tetrahedralize === 'function') {
+      if (existingModule.ready) {
+        try {
+          await existingModule.ready;
+          if (existingModule.wasmInstance) {
+            tetgenModule = existingModule;
+            tetgenAvailable = true;
+            return true;
+          }
+        } catch (e: any) {
+          tetgenLoadError = 'WASM init failed: ' + (e?.message || String(e));
+        }
+      } else {
+        tetgenModule = existingModule;
+        tetgenAvailable = true;
+        return true;
+      }
     }
 
     try {
-      const response = await fetch('/tetgen/tetgen.js');
-      if (!response.ok) throw new Error('tetgen.js not found');
+      const response = await fetch('/tetgen/tetgen.js', { cache: 'no-store' });
+      if (!response.ok) {
+        tetgenLoadError = `Cannot load tetgen.js (HTTP ${response.status})`;
+        throw new Error(tetgenLoadError);
+      }
+
       const scriptText = await response.text();
       const script = document.createElement('script');
       script.textContent = scriptText;
       document.head.appendChild(script);
-      if ((window as any).TetGen) {
-        tetgenModule = (window as any).TetGen;
-        tetgenAvailable = true;
-        return true;
-      }
-    } catch (e) {
-    }
 
-    tetgenAvailable = false;
-    return false;
-  } catch (e) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 50));
+
+      const module = (window as any).TetGen as TetGenModule;
+      if (!module) {
+        tetgenLoadError = 'tetgen.js did not expose TetGen module';
+        throw new Error(tetgenLoadError);
+      }
+
+      if (module.ready) {
+        try {
+          await module.ready;
+          if (module.wasmInstance) {
+            tetgenModule = module;
+            tetgenAvailable = true;
+            return true;
+          } else {
+            tetgenLoadError = 'tetgen.wasm not found or failed to compile';
+            return false;
+          }
+        } catch (e: any) {
+          tetgenLoadError = 'WASM load failed: ' + (e?.message || String(e));
+          return false;
+        }
+      } else {
+        if (typeof module.tetrahedralize === 'function') {
+          tetgenModule = module;
+          tetgenAvailable = true;
+          return true;
+        }
+        tetgenLoadError = 'TetGen module missing tetrahedralize function';
+        return false;
+      }
+    } catch (e: any) {
+      if (!tetgenLoadError) {
+        tetgenLoadError = e?.message || String(e);
+      }
+      return false;
+    }
+  } catch (e: any) {
+    tetgenLoadError = e?.message || String(e);
     tetgenAvailable = false;
     return false;
   }
@@ -65,8 +134,9 @@ export async function generateHighQualityTetMesh(
   if (hasTetGen && tetgenModule) {
     try {
       return generateWithTetGen(surface, targetSize, qualityRatio);
-    } catch (e) {
-      console.warn('TetGen failed, falling back to voxel method:', e);
+    } catch (e: any) {
+      console.warn('TetGen tetrahedralization failed, falling back to voxel method:', e);
+      tetgenLoadError = 'Tetrahedralization failed: ' + (e?.message || String(e));
     }
   }
 
@@ -81,41 +151,115 @@ function generateWithTetGen(
   targetSize: number,
   qualityRatio: number
 ): MeshGeneratorResult {
+  if (!tetgenModule) {
+    throw new Error('TetGen module not loaded');
+  }
+
   const numVertices = surface.vertices.length / 3;
   const numFaces = surface.indices.length / 3;
 
+  const facesWithOrientation = new Int32Array(numFaces * 4);
+  for (let i = 0; i < numFaces; i++) {
+    facesWithOrientation[i * 4] = surface.indices[i * 3];
+    facesWithOrientation[i * 4 + 1] = surface.indices[i * 3 + 1];
+    facesWithOrientation[i * 4 + 2] = surface.indices[i * 3 + 2];
+    facesWithOrientation[i * 4 + 3] = 0;
+  }
+
+  const maxVolume = targetSize * targetSize * targetSize * 0.5;
+
   const result = tetgenModule.tetrahedralize(
     numVertices,
-    surface.vertices,
+    surface.vertices as unknown as Float64Array,
     numFaces,
-    surface.indices,
-    {
-      quality: qualityRatio,
-      volumeConstraint: targetSize * targetSize * targetSize * 0.5,
-      preserveBoundary: true,
-      switches: 'pq1.414Y',
-    }
+    facesWithOrientation,
+    qualityRatio,
+    maxVolume
   );
 
   const numNodes = result.numPoints;
-  const numElements = result.numTetrahedra;
+  const numElements = result.numTets;
   const nodes = new Float64Array(result.points);
-  const elements = new Uint32Array(result.tetrahedra);
+  const elements = new Uint32Array(result.tets);
 
-  const numFacesOut = result.numTriangles || 0;
-  const surfaceFaces = new Uint32Array(result.triangles || new Uint32Array(0));
-  const surfaceNormals = new Float32Array(numFacesOut * 3);
+  const { surfaceFaces, surfaceNormals, numSurfaceFaces } = extractSurfaceFaces(nodes, elements, numNodes, numElements);
 
-  for (let i = 0; i < numFacesOut; i++) {
-    const i0 = surfaceFaces[i * 3];
-    const i1 = surfaceFaces[i * 3 + 1];
-    const i2 = surfaceFaces[i * 3 + 2];
-    const ax = nodes[i1 * 3] - nodes[i0 * 3];
-    const ay = nodes[i1 * 3 + 1] - nodes[i0 * 3 + 1];
-    const az = nodes[i1 * 3 + 2] - nodes[i0 * 3 + 2];
-    const bx = nodes[i2 * 3] - nodes[i0 * 3];
-    const by = nodes[i2 * 3 + 1] - nodes[i0 * 3 + 1];
-    const bz = nodes[i2 * 3 + 2] - nodes[i0 * 3 + 2];
+  const mesh: TetMesh = {
+    nodes,
+    elements,
+    surfaceFaces,
+    surfaceNormals,
+    numNodes,
+    numElements,
+    numSurfaceFaces,
+  };
+
+  const quality = computeMeshQuality(mesh);
+  return { mesh, method: 'tetgen', quality };
+}
+
+function extractSurfaceFaces(
+  nodes: Float64Array,
+  elements: Uint32Array,
+  numNodes: number,
+  numElements: number
+): { surfaceFaces: Uint32Array; surfaceNormals: Float32Array; numSurfaceFaces: number } {
+  const faceMap = new Map<string, number>();
+  const faceList: number[][] = [];
+
+  const allFaces: number[][] = [];
+  for (let e = 0; e < numElements; e++) {
+    const n0 = elements[e * 4];
+    const n1 = elements[e * 4 + 1];
+    const n2 = elements[e * 4 + 2];
+    const n3 = elements[e * 4 + 3];
+
+    const tetFaces = [
+      [n0, n1, n2],
+      [n0, n2, n3],
+      [n0, n3, n1],
+      [n1, n3, n2],
+    ];
+
+    for (const f of tetFaces) {
+      const sorted = [...f].sort((a, b) => a - b);
+      const key = sorted.join(',');
+      if (faceMap.has(key)) {
+        faceMap.set(key, faceMap.get(key)! + 1);
+      } else {
+        faceMap.set(key, 1);
+        allFaces.push(f);
+      }
+    }
+  }
+
+  for (const f of allFaces) {
+    const sorted = [...f].sort((a, b) => a - b);
+    const key = sorted.join(',');
+    if (faceMap.get(key) === 1) {
+      faceList.push(f);
+    }
+  }
+
+  const numSurfaceFaces = faceList.length;
+  const surfaceFaces = new Uint32Array(numSurfaceFaces * 3);
+  const surfaceNormals = new Float32Array(numSurfaceFaces * 3);
+
+  for (let i = 0; i < numSurfaceFaces; i++) {
+    const f = faceList[i];
+    surfaceFaces[i * 3] = f[0];
+    surfaceFaces[i * 3 + 1] = f[1];
+    surfaceFaces[i * 3 + 2] = f[2];
+
+    const i0 = f[0] * 3;
+    const i1 = f[1] * 3;
+    const i2 = f[2] * 3;
+    const ax = nodes[i1] - nodes[i0];
+    const ay = nodes[i1 + 1] - nodes[i0 + 1];
+    const az = nodes[i1 + 2] - nodes[i0 + 2];
+    const bx = nodes[i2] - nodes[i0];
+    const by = nodes[i2 + 1] - nodes[i0 + 1];
+    const bz = nodes[i2 + 2] - nodes[i0 + 2];
     const nx = ay * bz - az * by;
     const ny = az * bx - ax * bz;
     const nz = ax * by - ay * bx;
@@ -127,18 +271,7 @@ function generateWithTetGen(
     }
   }
 
-  const mesh: TetMesh = {
-    nodes,
-    elements,
-    surfaceFaces,
-    surfaceNormals,
-    numNodes,
-    numElements,
-    numSurfaceFaces: numFacesOut,
-  };
-
-  const quality = computeMeshQuality(mesh);
-  return { mesh, method: 'tetgen', quality };
+  return { surfaceFaces, surfaceNormals, numSurfaceFaces };
 }
 
 export function smoothMesh(mesh: TetMesh, iterations: number): void {

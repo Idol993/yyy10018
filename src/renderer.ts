@@ -54,6 +54,8 @@ export class FEARenderer {
   private fps = 60;
   canvas: HTMLCanvasElement;
 
+  private currentStressRange: { min: number; max: number } | null = null;
+
   constructor(container: HTMLElement) {
     this.container = container;
     this.raycaster = new THREE.Raycaster();
@@ -127,9 +129,12 @@ export class FEARenderer {
     this.animationRunning = false;
   }
 
-  setMesh(mesh: TetMesh): void {
+  setMesh(mesh: TetMesh | null): void {
     this.tetMesh = mesh;
+    this.currentStressRange = null;
     this.clearMesh();
+
+    if (!mesh) return;
 
     const geometry = new THREE.BufferGeometry();
     const numNodes = mesh.numNodes;
@@ -197,14 +202,14 @@ export class FEARenderer {
     this.originalPositions = null;
   }
 
-  updateDeformation(displacements: Float64Array, scale: number, vonMisesStress: Float64Array | null): void {
+  updateDeformation(displacements: Float64Array | null, scale: number, vonMisesStress: Float64Array | null): void {
     if (!this.mesh || !this.originalPositions || !this.tetMesh) return;
 
     const geometry = this.mesh.geometry;
     const positionAttr = geometry.getAttribute('position') as THREE.BufferAttribute;
     const positions = positionAttr.array as Float32Array;
 
-    if (this.showDeformation) {
+    if (displacements && this.showDeformation) {
       for (let i = 0; i < this.originalPositions.length; i++) {
         positions[i] = this.originalPositions[i] + displacements[i] * scale;
       }
@@ -230,18 +235,24 @@ export class FEARenderer {
         }
       }
 
+      let minStress = Infinity;
       let maxStress = 0;
       for (let i = 0; i < numNodes; i++) {
         if (nodeCount[i] > 0) {
           nodeStress[i] /= nodeCount[i];
+          if (nodeStress[i] < minStress) minStress = nodeStress[i];
           if (nodeStress[i] > maxStress) maxStress = nodeStress[i];
         }
       }
 
+      if (minStress === Infinity) minStress = 0;
+      this.currentStressRange = { min: minStress, max: maxStress };
+
+      const stressRange = maxStress - minStress;
       const colors = new Float32Array(numNodes * 3);
       for (let i = 0; i < numNodes; i++) {
         const stress = nodeStress[i];
-        const t = maxStress > 0 ? stress / maxStress : 0;
+        const t = stressRange > 1e-12 ? (stress - minStress) / stressRange : 0;
         const color = viridis(t);
         colors[i * 3] = color.r;
         colors[i * 3 + 1] = color.g;
@@ -254,6 +265,7 @@ export class FEARenderer {
         this.material.needsUpdate = true;
       }
     } else {
+      this.currentStressRange = null;
       geometry.deleteAttribute('color');
       if (this.material) {
         this.material.vertexColors = false;
@@ -271,10 +283,15 @@ export class FEARenderer {
     }
   }
 
-  updateBCVisualization(bc: BoundaryConditions, mesh: TetMesh): void {
+  getCurrentStressRange(): { min: number; max: number } | null {
+    return this.currentStressRange;
+  }
+
+  updateBCVisualization(bc: BoundaryConditions, mesh: TetMesh | null): void {
     if (!this.bcGroup) return;
 
     this.bcGroup.clear();
+    if (!mesh) return;
 
     const sphereGeometry = new THREE.SphereGeometry(0.03, 16, 16);
     const redMaterial = new THREE.MeshBasicMaterial({ color: 0xff3333 });

@@ -38,6 +38,8 @@ export interface BoundaryConditions {
 export interface NeoHookeanParams {
   mu: number;
   lambda: number;
+  E?: number;
+  nu?: number;
 }
 
 export interface SolverSettings {
