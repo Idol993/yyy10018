@@ -106,7 +106,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
     </div>
     <div class="section">
       <div class="section-title"><span class="icon">🧪</span> Material (Neo-Hookean)</div>
-      <div class="field"><label>E (MPa)</label><input type="number" id="mat-E" value="200" step="1" min="0.01"/></div>
+      <div class="field"><label>E (GPa)</label><input type="number" id="mat-E" value="200" step="1" min="0.01"/></div>
       <div class="field"><label>ν</label><input type="number" id="mat-nu" value="0.3" step="0.01" min="0" max="0.499"/></div>
     </div>
     <div class="section">
@@ -158,6 +158,9 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
       <div style="height:6px"></div>
       <div class="info-row"><span>Ref disp</span><span class="val" id="ver-disp">—</span></div>
       <div class="info-row"><span>Disp error</span><span class="val" id="ver-disp-err">—</span></div>
+      <div style="height:6px"></div>
+      <div class="info-row"><span>Ref stress</span><span class="val" id="ver-stress-ref">—</span></div>
+      <div class="info-row"><span>Comp stress</span><span class="val" id="ver-stress-comp">—</span></div>
       <div class="info-row"><span>Stress error</span><span class="val" id="ver-stress-err">—</span></div>
       <div style="height:6px"></div>
       <div class="info-row"><span>Disp tol</span><span class="val" id="ver-disp-tol" style="color:#8b949e">—</span></div>

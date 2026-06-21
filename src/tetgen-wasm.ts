@@ -137,23 +137,35 @@ async function loadTetGenWasm(): Promise<boolean> {
   }
 }
 
+function tryGetExport(name: string): any {
+  if (!tetgenWasmInstance) return undefined;
+  const exports = tetgenWasmInstance.exports as any;
+  if (typeof exports[name] === 'function' || typeof exports[name] === 'number') {
+    return exports[name];
+  }
+  const underscoreName = '_' + name;
+  if (typeof exports[underscoreName] === 'function' || typeof exports[underscoreName] === 'number') {
+    return exports[underscoreName];
+  }
+  return undefined;
+}
+
 function getExport(name: string): any {
-  if (!tetgenWasmInstance) throw new Error('TetGen WASM not loaded');
-  const exp = (tetgenWasmInstance.exports as any)[name];
-  if (typeof exp !== 'function' && typeof exp !== 'number') {
-    throw new Error(`TetGen WASM export "${name}" not found`);
+  const exp = tryGetExport(name);
+  if (exp === undefined) {
+    throw new Error(`TetGen WASM export "${name}" (or "_${name}") not found`);
   }
   return exp;
 }
 
 function malloc(size: number): number {
-  const fn = getExport('malloc') || getExport('_malloc');
+  const fn = tryGetExport('malloc');
   if (typeof fn !== 'function') throw new Error('malloc not found');
   return fn(size);
 }
 
 function free(ptr: number): void {
-  const fn = getExport('free') || getExport('_free');
+  const fn = tryGetExport('free');
   if (typeof fn === 'function') fn(ptr);
 }
 
@@ -181,7 +193,16 @@ function tetrahedralize(
   const outNumTetsPtr = malloc(4);
   const outTetsPtrPtr = malloc(4);
 
-  const tetFn = getExport('tetrahedralize') || getExport('_tetrahedralize');
+  const tetFn = tryGetExport('tetrahedralize');
+  if (typeof tetFn !== 'function') {
+    free(pointsPtr);
+    free(facesPtr);
+    free(outNumPointsPtr);
+    free(outPointsPtrPtr);
+    free(outNumTetsPtr);
+    free(outTetsPtrPtr);
+    throw new Error('tetrahedralize function not found in WASM exports');
+  }
 
   let returnCode: number;
   try {

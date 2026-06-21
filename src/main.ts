@@ -72,7 +72,7 @@ class WebFEAApp {
       'sb-mode', 'sb-gpu', 'sb-mesh', 'sb-solve',
       'stress-legend', 'stress-min', 'stress-max',
       'res-max-disp', 'res-max-stress', 'res-min-stress',
-      'ver-case', 'ver-ref', 'ver-disp', 'ver-disp-err', 'ver-stress-err', 'ver-disp-tol', 'ver-stress-tol',
+      'ver-case', 'ver-ref', 'ver-disp', 'ver-disp-err', 'ver-stress-ref', 'ver-stress-comp', 'ver-stress-err', 'ver-disp-tol', 'ver-stress-tol',
       'mode-indicator',
     ];
     for (const id of ids) {
@@ -187,10 +187,13 @@ class WebFEAApp {
   private loadSampleCube(): void {
     this.clearResults();
     
-    const E = 200e3;
+    const E_GPa = 200;
+    const E = E_GPa * 1e9;
     const nu = 0.3;
     const conv = this.converters.EtoMuLambda(E, nu);
     this.state.material = { E, nu, ...conv };
+    
+    (this.els['mat-E'] as HTMLInputElement).value = String(E_GPa);
     
     this.state.tetMesh = generateBeam(4, 1, 1, 4);
     this.state.surfaceMesh = {
@@ -237,14 +240,14 @@ class WebFEAApp {
       const targetSize = parseFloat(prompt('Enter target element size:', '0.3') || '0.3');
 
       this.appendLog('Generating tetrahedral mesh...', '');
-      
+
       const hasTetGen = await isTetGenAvailable();
       const loadError = getTetGenLoadError();
 
       if (hasTetGen) {
-        this.appendLog('✅ Using TetGen WASM for high-quality constrained Delaunay meshing', '');
+        this.appendLog('Attempting TetGen WASM for high-quality constrained Delaunay meshing...', '');
       } else {
-        this.appendLog('⚠️ TetGen WASM unavailable - falling back to VOXEL APPROXIMATION', 'warn');
+        this.appendLog('⚠️ TetGen WASM unavailable - using VOXEL APPROXIMATION', 'warn');
         if (loadError) {
           this.appendLog(`   Reason: ${loadError}`, 'warn');
         }
@@ -253,8 +256,21 @@ class WebFEAApp {
       }
 
       const result = await generateHighQualityTetMesh(this.state.surfaceMesh, targetSize, 1.414);
+      const usedMethod = result.method;
+      const finalError = getTetGenLoadError();
+
+      if (hasTetGen && usedMethod === 'tetgen') {
+        this.appendLog('✅ TetGen WASM mesh generation succeeded', 'conv');
+      } else if (hasTetGen && usedMethod === 'voxel') {
+        this.appendLog(`❌ TetGen failed: ${finalError || 'Unknown error'}`, 'err');
+        this.appendLog('⚠️ Falling back to VOXEL APPROXIMATION', 'warn');
+        this.appendLog('   Voxel meshes have stair-step boundaries and lower quality', 'warn');
+      } else {
+        this.appendLog('⚠️ Voxel approximate mesh generated', 'warn');
+      }
+
       this.state.tetMesh = result.mesh;
-      this.state.meshMethod = result.method;
+      this.state.meshMethod = usedMethod;
       this.state.meshQuality = result.quality;
 
       const t1 = performance.now();
@@ -267,12 +283,12 @@ class WebFEAApp {
       this.interaction.setMode('navigate');
       this.setMode('navigate');
 
-      const methodLabel = result.method === 'tetgen' ? '✅ TetGen (high quality)' : '⚠️ Voxel (approximate)';
-      this.appendLog(`Mesh generated: ${this.state.tetMesh.numNodes} nodes, ${this.state.tetMesh.numElements} tets`, 'conv');
+      const methodLabel = usedMethod === 'tetgen' ? '✅ TetGen (high quality)' : '⚠️ Voxel (approximate)';
+      this.appendLog(`Mesh: ${this.state.tetMesh.numNodes} nodes, ${this.state.tetMesh.numElements} tets`, '');
       this.appendLog(`Method: ${methodLabel}`, '');
       this.appendLog(`Quality: min=${result.quality.minQuality.toFixed(3)}, avg=${result.quality.avgQuality.toFixed(3)}, maxAR=${result.quality.maxAspectRatio.toFixed(2)}`, '');
       this.appendLog(`Time: ${(t1 - t0).toFixed(1)}ms`, '');
-      
+
       this.clearResults();
       this.updateUI();
       this.updateBCList();
@@ -325,6 +341,8 @@ class WebFEAApp {
     (this.els['ver-stress-err'] as HTMLElement).textContent = '—';
     (this.els['ver-disp-err'] as HTMLElement).style.color = '';
     (this.els['ver-stress-err'] as HTMLElement).style.color = '';
+    (this.els['ver-stress-ref'] as HTMLElement).textContent = '—';
+    (this.els['ver-stress-comp'] as HTMLElement).textContent = '—';
     (this.els['ver-disp-tol'] as HTMLElement).textContent = '—';
     (this.els['ver-stress-tol'] as HTMLElement).textContent = '—';
     (this.els['status-iter'] as HTMLElement).textContent = '—';
@@ -342,7 +360,8 @@ class WebFEAApp {
   }
 
   private updateMaterial(): void {
-    const E = parseFloat((this.els['mat-E'] as HTMLInputElement).value) * 1e3;
+    const E_GPa = parseFloat((this.els['mat-E'] as HTMLInputElement).value);
+    const E = E_GPa * 1e9;
     const nu = parseFloat((this.els['mat-nu'] as HTMLInputElement).value);
     const conv = this.converters.EtoMuLambda(E, nu);
     this.state.material = { E, nu, ...conv };
@@ -595,6 +614,8 @@ class WebFEAApp {
       (this.els['ver-ref'] as HTMLElement).textContent = '—';
       (this.els['ver-disp'] as HTMLElement).textContent = '—';
       (this.els['ver-disp-err'] as HTMLElement).textContent = '—';
+      (this.els['ver-stress-ref'] as HTMLElement).textContent = '—';
+      (this.els['ver-stress-comp'] as HTMLElement).textContent = '—';
       (this.els['ver-stress-err'] as HTMLElement).textContent = '—';
       (this.els['ver-disp-err'] as HTMLElement).style.color = '';
       (this.els['ver-stress-err'] as HTMLElement).style.color = '';
@@ -615,6 +636,8 @@ class WebFEAApp {
     if (!ver) {
       (this.els['ver-disp'] as HTMLElement).textContent = 'N/A';
       (this.els['ver-disp-err'] as HTMLElement).textContent = 'N/A';
+      (this.els['ver-stress-ref'] as HTMLElement).textContent = 'N/A';
+      (this.els['ver-stress-comp'] as HTMLElement).textContent = 'N/A';
       (this.els['ver-stress-err'] as HTMLElement).textContent = 'N/A';
       return;
     }
@@ -622,6 +645,8 @@ class WebFEAApp {
     (this.els['ver-case'] as HTMLElement).textContent = ver.caseName;
     (this.els['ver-ref'] as HTMLElement).textContent = ver.referenceSource;
     (this.els['ver-disp'] as HTMLElement).textContent = formatDisp_mm(ver.referenceDisp) + ' (ref)';
+    (this.els['ver-stress-ref'] as HTMLElement).textContent = formatStress_MPa(ver.referenceStress);
+    (this.els['ver-stress-comp'] as HTMLElement).textContent = formatStress_MPa(ver.computedStress);
     (this.els['ver-disp-tol'] as HTMLElement).textContent = `≤${ver.dispTolerance}%`;
     (this.els['ver-stress-tol'] as HTMLElement).textContent = `≤${ver.stressTolerance}%`;
 

@@ -131,9 +131,9 @@ function detectCantileverConfig(
     notes.push('No force BCs');
   }
 
-  const E_MPa = (material.E || 0) / 1e6;
-  if (E_MPa > 0 && Math.abs(E_MPa - CANTILEVER_BENCHMARK.material.E_MPa) > 1.0) {
-    notes.push(`E=${E_MPa.toFixed(0)} MPa ≠ ${CANTILEVER_BENCHMARK.material.E_MPa} MPa`);
+  const E_GPa = (material.E || 0) / 1e9;
+  if (E_GPa > 0 && Math.abs(E_GPa - (CANTILEVER_BENCHMARK.material.E_MPa / 1000)) > 1.0) {
+    notes.push(`E=${E_GPa.toFixed(0)} GPa ≠ ${CANTILEVER_BENCHMARK.material.E_MPa / 1000} GPa`);
   }
 
   const hasCorrectForce = bc.forces.some(f =>
