@@ -101,6 +101,8 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
       <div class="info-row"><span>Elements</span><span class="val" id="info-elements">—</span></div>
       <div class="info-row"><span>DOFs</span><span class="val" id="info-dofs">—</span></div>
       <div class="info-row"><span>Surface faces</span><span class="val" id="info-faces">—</span></div>
+      <div class="info-row"><span>Mesh method</span><span class="val" id="info-method">—</span></div>
+      <div class="info-row"><span>Quality</span><span class="val" id="info-quality">—</span></div>
     </div>
     <div class="section">
       <div class="section-title"><span class="icon">🧪</span> Material (Neo-Hookean)</div>
@@ -151,9 +153,15 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(
     </div>
     <div class="section">
       <div class="section-title"><span class="icon">✅</span> Verification</div>
-      <div class="info-row"><span>Analytical disp</span><span class="val" id="ver-disp">—</span></div>
+      <div class="info-row"><span>Case</span><span class="val" id="ver-case">—</span></div>
+      <div class="info-row"><span>Reference</span><span class="val" id="ver-ref" style="font-size:10px;color:#8b949e;text-align:right">—</span></div>
+      <div style="height:6px"></div>
+      <div class="info-row"><span>Ref disp</span><span class="val" id="ver-disp">—</span></div>
       <div class="info-row"><span>Disp error</span><span class="val" id="ver-disp-err">—</span></div>
       <div class="info-row"><span>Stress error</span><span class="val" id="ver-stress-err">—</span></div>
+      <div style="height:6px"></div>
+      <div class="info-row"><span>Disp tol</span><span class="val" style="color:#8b949e">5%</span></div>
+      <div class="info-row"><span>Stress tol</span><span class="val" style="color:#8b949e">15%</span></div>
     </div>
   </div>
 

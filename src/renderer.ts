@@ -42,12 +42,16 @@ export class FEARenderer {
   private highlightSphere: THREE.Mesh | null = null;
   private forceArrow: THREE.ArrowHelper | null = null;
   private resizeObserver: ResizeObserver;
-  private showWireframe = true;
+  private showWireframe = false;
   private showStressColoring = false;
   private showDeformation = true;
-  private animationId: number | null = null;
+  private animationFrameId: number | null = null;
+  private animationRunning = false;
   private raycaster: THREE.Raycaster;
   private mouse: THREE.Vector2;
+  private lastFrameTime = 0;
+  private frameCount = 0;
+  private fps = 60;
   canvas: HTMLCanvasElement;
 
   constructor(container: HTMLElement) {
@@ -56,15 +60,15 @@ export class FEARenderer {
     this.mouse = new THREE.Vector2();
 
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x1a1a2e);
+    this.scene.background = new THREE.Color(0x0d1117);
 
     const width = container.clientWidth;
     const height = container.clientHeight;
 
-    this.camera = new THREE.PerspectiveCamera(60, width / height, 0.1, 1000);
+    this.camera = new THREE.PerspectiveCamera(60, width / height, 0.001, 10000);
     this.camera.position.set(3, 2, 5);
 
-    this.renderer = new THREE.WebGLRenderer({ antialias: true });
+    this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
     this.renderer.setSize(width, height);
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.shadowMap.enabled = true;
@@ -73,17 +77,17 @@ export class FEARenderer {
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true;
-    this.controls.dampingFactor = 0.05;
+    this.controls.dampingFactor = 0.08;
 
     this.ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
     this.scene.add(this.ambientLight);
 
     this.directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
-    this.directionalLight.position.set(1, 1, 1);
+    this.directionalLight.position.set(1, 1.5, 1);
     this.directionalLight.castShadow = true;
     this.scene.add(this.directionalLight);
 
-    this.gridHelper = new THREE.GridHelper(10, 10, 0x444444, 0x222222);
+    this.gridHelper = new THREE.GridHelper(10, 10, 0x30363d, 0x161b22);
     this.scene.add(this.gridHelper);
 
     this.bcGroup = new THREE.Group();
@@ -92,7 +96,35 @@ export class FEARenderer {
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(container);
 
-    this.render();
+    this.startAnimationLoop();
+  }
+
+  private startAnimationLoop(): void {
+    if (this.animationRunning) return;
+    this.animationRunning = true;
+    this.lastFrameTime = performance.now();
+
+    const tick = () => {
+      this.animationFrameId = requestAnimationFrame(tick);
+      const now = performance.now();
+      const delta = now - this.lastFrameTime;
+      this.lastFrameTime = now;
+      this.frameCount++;
+      if (this.frameCount % 30 === 0) {
+        this.fps = 1000 / delta;
+      }
+      this.controls.update();
+      this.renderer.render(this.scene, this.camera);
+    };
+    tick();
+  }
+
+  private stopAnimationLoop(): void {
+    if (this.animationFrameId !== null) {
+      cancelAnimationFrame(this.animationFrameId);
+      this.animationFrameId = null;
+    }
+    this.animationRunning = false;
   }
 
   setMesh(mesh: TetMesh): void {
@@ -404,6 +436,14 @@ export class FEARenderer {
     this.renderer.domElement.addEventListener(event, callback as EventListener);
   }
 
+  getFPS(): number {
+    return this.fps;
+  }
+
+  renderFrame(): void {
+    this.renderer.render(this.scene, this.camera);
+  }
+
   resize(): void {
     const width = this.container.clientWidth;
     const height = this.container.clientHeight;
@@ -412,23 +452,15 @@ export class FEARenderer {
     this.renderer.setSize(width, height);
   }
 
-  render(): void {
-    const animate = () => {
-      this.animationId = requestAnimationFrame(animate);
-      this.controls.update();
-      this.renderer.render(this.scene, this.camera);
-    };
-    animate();
-  }
-
   dispose(): void {
-    if (this.animationId) {
-      cancelAnimationFrame(this.animationId);
-    }
+    this.stopAnimationLoop();
     this.resizeObserver.disconnect();
     this.clearHighlight();
     this.hideForceArrow();
     this.clearMesh();
+    if (this.bcGroup) {
+      this.bcGroup.clear();
+    }
     this.renderer.dispose();
     this.controls.dispose();
     if (this.container.contains(this.renderer.domElement)) {

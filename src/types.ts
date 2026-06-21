@@ -70,6 +70,8 @@ export interface AppState {
   mode: InteractionMode;
   surfaceMesh: SurfaceMesh | null;
   tetMesh: TetMesh | null;
+  meshMethod: 'tetgen' | 'voxel' | 'builtin';
+  meshQuality: { minQuality: number; avgQuality: number; maxAspectRatio: number } | null;
   bc: BoundaryConditions;
   material: NeoHookeanParams;
   settings: SolverSettings;

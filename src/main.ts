@@ -1,11 +1,13 @@
 import { loadModelFile } from './mesh-loader';
 import { generateTetMesh, generateSampleCube, generateBeam, findNearestNode } from './tet-mesh';
+import { generateHighQualityTetMesh, isTetGenAvailable, computeMeshQuality, type MeshGeneratorType } from './tetgen-wasm';
 import { solveNewtonRaphson, computeNeoHookeanPK1, computeVonMisesFromPK1, computeTetShapeGradients, assembleTangentAndInternal, assembleExternalForce } from './fem-solver';
 import { WebGPUBackend, pcgSolveCPU } from './gpu-pcg';
 import { FEARenderer } from './renderer';
 import { ConvergenceChart } from './convergence-chart';
 import { InteractionManager } from './interaction';
 import { COOBuilder } from './sparse-matrix';
+import { runVerification, formatDisp, formatStress, type VerificationResult } from './verification';
 import type { TetMesh, BoundaryConditions, NeoHookeanParams, SolverSettings, SolverResult, InteractionMode, Vec3, FixedBC, ForceBC, AppState, CSRSparseMatrix } from './types';
 
 class WebFEAApp {
@@ -25,13 +27,15 @@ class WebFEAApp {
       mode: 'navigate',
       surfaceMesh: null,
       tetMesh: null,
+      meshMethod: 'builtin',
+      meshQuality: null,
       bc: { fixed: [], forces: [] },
       material: { mu: 76.9e3, lambda: 115.4e3 },
       settings: { maxIter: 30, tolerance: 1e-6, loadSteps: 5 },
       result: null,
       showWireframe: false,
       showDeformed: true,
-      showStress: true,
+      showStress: false,
       deformScale: 1,
     };
   }
@@ -43,9 +47,15 @@ class WebFEAApp {
     this.setupConvergenceChart();
     this.setupInteraction();
     this.setupEventListeners();
+    this.syncButtonStates();
     this.loadSampleCube();
     this.updateUI();
-    this.loop();
+  }
+
+  private syncButtonStates(): void {
+    (this.els['btn-wireframe'] as HTMLElement).classList.toggle('active', this.state.showWireframe);
+    (this.els['btn-deformed'] as HTMLElement).classList.toggle('active', this.state.showDeformed);
+    (this.els['btn-stress'] as HTMLElement).classList.toggle('active', this.state.showStress);
   }
 
   private cacheElements(): void {
@@ -53,13 +63,13 @@ class WebFEAApp {
       'viewport', 'btn-import', 'btn-sample', 'btn-mesh', 'btn-fix', 'btn-force',
       'btn-clear-bc', 'btn-solve', 'btn-stop', 'btn-wireframe', 'btn-deformed', 'btn-stress',
       'file-input', 'bc-list', 'convergence-canvas', 'solver-log',
-      'info-nodes', 'info-elements', 'info-dofs', 'info-faces',
+      'info-nodes', 'info-elements', 'info-dofs', 'info-faces', 'info-method', 'info-quality',
       'mat-E', 'mat-nu', 'solve-maxiter', 'solve-tol', 'solve-steps', 'deform-scale',
       'status-iter', 'status-residual', 'status-time',
       'sb-mode', 'sb-gpu', 'sb-mesh', 'sb-solve',
       'stress-legend', 'stress-min', 'stress-max',
       'res-max-disp', 'res-max-stress', 'res-min-stress',
-      'ver-disp', 'ver-disp-err', 'ver-stress-err',
+      'ver-case', 'ver-ref', 'ver-disp', 'ver-disp-err', 'ver-stress-err',
       'mode-indicator',
     ];
     for (const id of ids) {
@@ -131,6 +141,9 @@ class WebFEAApp {
     for (const id of solverInputs) {
       (this.els[id] as HTMLInputElement).onchange = () => this.updateSettings();
     }
+
+    const legend = this.els['stress-legend'] as HTMLElement;
+    legend.style.background = 'linear-gradient(to right, #440154, #3b528b, #21918c, #5ec962, #fde725)';
   }
 
   private async handleFileImport(e: Event): Promise<void> {
@@ -155,6 +168,8 @@ class WebFEAApp {
       indices: new Uint32Array(this.state.tetMesh.surfaceFaces),
       normals: new Float32Array(this.state.tetMesh.surfaceNormals),
     };
+    this.state.meshMethod = 'builtin';
+    this.state.meshQuality = computeMeshQuality(this.state.tetMesh);
 
     this.state.bc = { fixed: [], forces: [] };
     const mesh = this.state.tetMesh;
@@ -173,6 +188,7 @@ class WebFEAApp {
     this.interaction.setMesh(this.state.tetMesh);
 
     this.appendLog(`Loaded sample beam: ${mesh.numNodes} nodes, ${mesh.numElements} tets`, '');
+    this.appendLog(`Mesh method: Built-in structured grid`, '');
     this.appendLog(`Auto-added ${this.state.bc.fixed.length} fixed BCs at x=-2`, '');
     this.appendLog(`Auto-added ${this.state.bc.forces.length} force BCs at x=+2, Fy=-100N`, '');
 
@@ -188,14 +204,32 @@ class WebFEAApp {
     try {
       const t0 = performance.now();
       const targetSize = parseFloat(prompt('Enter target element size:', '0.3') || '0.3');
-      this.state.tetMesh = generateTetMesh(this.state.surfaceMesh, targetSize);
+
+      this.appendLog('Generating tetrahedral mesh...', '');
+      const hasTetGen = await isTetGenAvailable();
+
+      if (hasTetGen) {
+        this.appendLog('Using TetGen WASM for high-quality meshing', '');
+      } else {
+        this.appendLog('⚠️ TetGen WASM not available, using voxel approximation', 'warn');
+      }
+
+      const result = await generateHighQualityTetMesh(this.state.surfaceMesh, targetSize, 1.414);
+      this.state.tetMesh = result.mesh;
+      this.state.meshMethod = result.method;
+      this.state.meshQuality = result.quality;
+
       const t1 = performance.now();
 
       this.state.bc = { fixed: [], forces: [] };
       this.renderer.setMesh(this.state.tetMesh);
       this.interaction.setMesh(this.state.tetMesh);
 
-      this.appendLog(`Mesh generated: ${this.state.tetMesh.numNodes} nodes, ${this.state.tetMesh.numElements} tets in ${(t1 - t0).toFixed(1)}ms`, 'conv');
+      const methodLabel = result.method === 'tetgen' ? 'TetGen (high quality)' : 'Voxel (approximate)';
+      this.appendLog(`Mesh generated: ${this.state.tetMesh.numNodes} nodes, ${this.state.tetMesh.numElements} tets`, 'conv');
+      this.appendLog(`Method: ${methodLabel}`, '');
+      this.appendLog(`Quality: min=${result.quality.minQuality.toFixed(3)}, avg=${result.quality.avgQuality.toFixed(3)}, maxAR=${result.quality.maxAspectRatio.toFixed(2)}`, '');
+      this.appendLog(`Time: ${(t1 - t0).toFixed(1)}ms`, '');
       this.updateUI();
     } catch (err) {
       this.appendLog(`Mesh generation failed: ${err}`, 'err');
@@ -322,6 +356,13 @@ class WebFEAApp {
       }
 
       this.convergenceChart.update(result.convergenceHistory);
+
+      if (!this.state.showStress) {
+        this.state.showStress = true;
+        this.renderer.setStressColoring(true);
+        this.syncButtonStates();
+      }
+
       this.updateDeformation();
       this.updateResultsUI();
       this.runVerification();
@@ -360,7 +401,29 @@ class WebFEAApp {
       (this.els['info-elements'] as HTMLElement).textContent = mesh.numElements.toLocaleString();
       (this.els['info-dofs'] as HTMLElement).textContent = (3 * mesh.numNodes).toLocaleString();
       (this.els['info-faces'] as HTMLElement).textContent = mesh.numSurfaceFaces.toLocaleString();
-      (this.els['sb-mesh'] as HTMLElement).textContent = `Mesh: ${mesh.numNodes} nodes, ${mesh.numElements} tets`;
+
+      const methodLabel = this.state.meshMethod === 'tetgen' ? 'TetGen' :
+                         this.state.meshMethod === 'voxel' ? 'Voxel' : 'Built-in';
+      (this.els['info-method'] as HTMLElement).textContent = methodLabel;
+      (this.els['info-method'] as HTMLElement).style.color =
+        this.state.meshMethod === 'tetgen' ? 'var(--accent2)' :
+        this.state.meshMethod === 'voxel' ? '#d29922' : '#8b949e';
+
+      if (this.state.meshQuality) {
+        const q = this.state.meshQuality.minQuality;
+        const qText = q.toFixed(3);
+        (this.els['info-quality'] as HTMLElement).textContent = qText;
+        (this.els['info-quality'] as HTMLElement).style.color =
+          q > 0.5 ? 'var(--accent2)' : q > 0.2 ? '#d29922' : 'var(--danger)';
+      } else {
+        (this.els['info-quality'] as HTMLElement).textContent = '—';
+      }
+
+      const qualityEmoji = this.state.meshQuality
+        ? (this.state.meshQuality.minQuality > 0.5 ? ' ✅' : this.state.meshQuality.minQuality > 0.2 ? ' ⚠️' : ' ❌')
+        : '';
+      (this.els['sb-mesh'] as HTMLElement).textContent =
+        `Mesh: ${methodLabel}${qualityEmoji} · ${mesh.numNodes} nodes · ${mesh.numElements} tets`;
     }
   }
 
@@ -437,72 +500,49 @@ class WebFEAApp {
   }
 
   private runVerification(): void {
-    if (!this.state.tetMesh || !this.state.result) return;
-
-    const mesh = this.state.tetMesh;
-    const E = this.state.material.mu * (3 * this.state.material.lambda + 2 * this.state.material.mu) / (this.state.material.lambda + this.state.material.mu);
-
-    const fixedNodes = this.state.bc.fixed.map(b => b.nodeId);
-    let minX = Infinity, maxX = -Infinity;
-    for (const id of fixedNodes) {
-      const x = mesh.nodes[id * 3];
-      if (x < minX) minX = x;
-      if (x > maxX) maxX = x;
+    if (!this.state.tetMesh || !this.state.result) {
+      (this.els['ver-disp'] as HTMLElement).textContent = '—';
+      (this.els['ver-disp-err'] as HTMLElement).textContent = '—';
+      (this.els['ver-stress-err'] as HTMLElement).textContent = '—';
+      return;
     }
 
-    const forceNodes = this.state.bc.forces.map(b => b.nodeId);
-    let fxNodes = -Infinity;
-    let totalForce = 0;
-    for (const f of this.state.bc.forces) {
-      const x = mesh.nodes[f.nodeId * 3];
-      if (x > fxNodes) fxNodes = x;
-      totalForce += Math.sqrt(f.force.x ** 2 + f.force.y ** 2 + f.force.z ** 2);
-    }
+    const ver = runVerification(
+      this.state.tetMesh,
+      this.state.bc,
+      this.state.material,
+      this.state.result
+    );
 
-    const L = fxNodes - (minX + maxX) / 2;
-    if (L <= 0 || totalForce <= 0) {
+    if (!ver) {
       (this.els['ver-disp'] as HTMLElement).textContent = 'N/A';
       (this.els['ver-disp-err'] as HTMLElement).textContent = 'N/A';
       (this.els['ver-stress-err'] as HTMLElement).textContent = 'N/A';
       return;
     }
 
-    let I = 0;
-    for (let i = 0; i < mesh.numElements; i++) {
-      const nodes = [
-        mesh.elements[i * 4], mesh.elements[i * 4 + 1], mesh.elements[i * 4 + 2], mesh.elements[i * 4 + 3]
-      ];
-      let ySum = 0, zSum = 0;
-      for (const n of nodes) {
-        ySum += mesh.nodes[n * 3 + 1];
-        zSum += mesh.nodes[n * 3 + 2];
-      }
-      const y = ySum / 4, z = zSum / 4;
-      if (Math.abs(y) < 0.5 && Math.abs(z) < 0.5) {
-        I += (1 / 12) * 1 * 1 * 1 * (mesh.nodes[nodes[0] * 3 + 1] ** 2 + mesh.nodes[nodes[0] * 3 + 2] ** 2) / 6;
-      }
-    }
-    I = 1 / 12;
-    const expectedDisp = (totalForce / 2) * L ** 3 / (E * I);
+    (this.els['ver-disp'] as HTMLElement).textContent = formatDisp(ver.referenceDisp);
+    (this.els['ver-case'] as HTMLElement).textContent = ver.caseName;
+    (this.els['ver-ref'] as HTMLElement).textContent = ver.referenceSource;
+    (this.els['ver-disp-err'] as HTMLElement).textContent = ver.dispErrorPct.toFixed(2) + '%';
+    (this.els['ver-stress-err'] as HTMLElement).textContent = ver.stressErrorPct.toFixed(2) + '%';
 
-    let maxDisp = 0;
-    for (const id of forceNodes) {
-      const d = Math.abs(this.state.result.displacements[id * 3 + 1]);
-      if (d > maxDisp) maxDisp = d;
-    }
+    (this.els['ver-disp-err'] as HTMLElement).style.color =
+      ver.dispPass ? 'var(--accent2)' : 'var(--danger)';
+    (this.els['ver-stress-err'] as HTMLElement).style.color =
+      ver.stressPass ? 'var(--accent2)' : 'var(--danger)';
 
-    const dispErr = Math.abs(maxDisp - expectedDisp) / expectedDisp * 100;
+    (this.els['ver-disp-err'] as HTMLElement).textContent =
+      (ver.dispPass ? '✓ ' : '✗ ') + ver.dispErrorPct.toFixed(2) + '%';
+    (this.els['ver-stress-err'] as HTMLElement).textContent =
+      (ver.stressPass ? '✓ ' : '✗ ') + ver.stressErrorPct.toFixed(2) + '%';
 
-    const maxStress = Math.max(...this.state.result.vonMisesStress) / 1e6;
-    const expectedStress = (totalForce * L * 0.5) / (I / 0.5) / 1e6;
-    const stressErr = Math.abs(maxStress - expectedStress) / Math.max(expectedStress, 1e-6) * 100;
-
-    (this.els['ver-disp'] as HTMLElement).textContent = expectedDisp.toExponential(3) + ' m';
-    (this.els['ver-disp-err'] as HTMLElement).textContent = dispErr.toFixed(2) + '%';
-    (this.els['ver-stress-err'] as HTMLElement).textContent = stressErr.toFixed(2) + '%';
-
-    (this.els['ver-disp-err'] as HTMLElement).style.color = dispErr < 1 ? 'var(--accent2)' : dispErr < 5 ? '#d29922' : 'var(--danger)';
-    (this.els['ver-stress-err'] as HTMLElement).style.color = stressErr < 5 ? 'var(--accent2)' : stressErr < 10 ? '#d29922' : 'var(--danger)';
+    this.appendLog(`Verification: ${ver.caseName}`, '');
+    this.appendLog(`  Ref: ${ver.referenceSource}`, '');
+    this.appendLog(`  Disp: ${formatDisp(ver.computedDisp)} vs ref ${formatDisp(ver.referenceDisp)} (${ver.dispErrorPct.toFixed(2)}%) ${ver.dispPass ? '✓' : '✗'}`,
+      ver.dispPass ? 'conv' : 'warn');
+    this.appendLog(`  Stress: ${formatStress(ver.computedStress)} vs ref ${formatStress(ver.referenceStress)} (${ver.stressErrorPct.toFixed(2)}%) ${ver.stressPass ? '✓' : '✗'}`,
+      ver.stressPass ? 'conv' : 'warn');
   }
 
   private appendLog(msg: string, cls: string = ''): void {
@@ -512,11 +552,6 @@ class WebFEAApp {
     div.textContent = msg;
     log.appendChild(div);
     log.scrollTop = log.scrollHeight;
-  }
-
-  private loop(): void {
-    this.renderer.render();
-    requestAnimationFrame(() => this.loop());
   }
 }
 
